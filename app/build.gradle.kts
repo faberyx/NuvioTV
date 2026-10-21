@@ -154,7 +154,7 @@ android {
         create("full") {
             dimension = "distribution"
             buildConfigField("boolean", "FEATURE_PLUGINS_ENABLED", "true")
-            buildConfigField("boolean", "FEATURE_IN_APP_UPDATES_ENABLED", "true")
+            buildConfigField("boolean", "FEATURE_IN_APP_UPDATES_ENABLED", "false")
             buildConfigField("boolean", "FEATURE_IN_APP_TRAILERS_ENABLED", "true")
             buildConfigField("boolean", "FEATURE_EXTERNAL_TRAILERS_ENABLED", "true")
             buildConfigField("boolean", "FEATURE_EXTERNAL_PLAYBACK_KEEP_ALIVE_ENABLED", "true")
@@ -191,8 +191,11 @@ android {
 
     buildTypes {
         debug {
-            signingConfig = signingConfigs.getByName("release")
-            isDebuggable = false
+            applicationIdSuffix = ".dtsfork"
+            versionNameSuffix = "-dtsfork"
+
+            signingConfig = signingConfigs.getByName("debug")
+            isDebuggable = true
             isMinifyEnabled = false
 
             buildConfigField("boolean", "IS_DEBUG_BUILD", "true")
@@ -334,7 +337,7 @@ android {
 androidComponents {
     onVariants(selector().withBuildType("debug")) { variant ->
         val isPlaystore = variant.productFlavors.any { it.second == "playstore" }
-        variant.applicationId.set(if (isPlaystore) "com.nuvio.appdebug" else "com.nuviodebug.com")
+        variant.applicationId.set(if (isPlaystore) "com.nuvio.appdebug" else "com.nuvio.tv.dtsfork")
     }
 }
 

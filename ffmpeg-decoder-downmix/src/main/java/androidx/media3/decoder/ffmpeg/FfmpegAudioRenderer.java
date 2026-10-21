@@ -131,15 +131,17 @@ public final class FfmpegAudioRenderer extends DecoderAudioRenderer<FfmpegAudioD
     if (!FfmpegLibrary.supportsFormat(mimeType)) {
       return C.FORMAT_UNSUPPORTED_SUBTYPE;
     }
-    if (forceOpticalPassthrough && MimeTypes.AUDIO_AC3.equals(mimeType)) {
+    boolean isDtsFamily = MimeTypes.AUDIO_DTS.equals(mimeType)
+        || MimeTypes.AUDIO_DTS_HD.equals(mimeType);
+
+    // DTS-only AC3 mode: when Force AC-3 is enabled, let this FFmpeg renderer
+    // claim only DTS/DTS-HD. Dolby formats and all other codecs fall back to
+    // the device renderer, preserving E-AC3/JOC passthrough and TrueHD/MS12.
+    if (forceOpticalPassthrough && !isDtsFamily) {
       return C.FORMAT_UNSUPPORTED_SUBTYPE;
     }
-    boolean isDtsOrTrueHd = MimeTypes.AUDIO_DTS.equals(mimeType)
-        || MimeTypes.AUDIO_DTS_HD.equals(mimeType)
-        || MimeTypes.AUDIO_TRUEHD.equals(mimeType);
-    boolean transcodeToAc3 = forceOpticalPassthrough &&
-        !MimeTypes.AUDIO_AC3.equals(mimeType) &&
-        (format.channelCount > 2 || format.channelCount <= 0 || isDtsOrTrueHd);
+
+    boolean transcodeToAc3 = forceOpticalPassthrough && isDtsFamily;
 
     if (!transcodeToAc3 && (format.channelCount <= 0 || format.sampleRate <= 0)) {
       return format.cryptoType == C.CRYPTO_TYPE_NONE
@@ -181,12 +183,9 @@ public final class FfmpegAudioRenderer extends DecoderAudioRenderer<FfmpegAudioD
       throws FfmpegDecoderException {
     TraceUtil.beginSection("createFfmpegAudioDecoder");
     String mimeType = checkNotNull(format.sampleMimeType);
-    boolean isDtsOrTrueHd = MimeTypes.AUDIO_DTS.equals(mimeType)
-        || MimeTypes.AUDIO_DTS_HD.equals(mimeType)
-        || MimeTypes.AUDIO_TRUEHD.equals(mimeType);
-    boolean transcodeToAc3 = forceOpticalPassthrough &&
-        !MimeTypes.AUDIO_AC3.equals(mimeType) &&
-        (format.channelCount > 2 || format.channelCount <= 0 || isDtsOrTrueHd);
+    boolean isDtsFamily = MimeTypes.AUDIO_DTS.equals(mimeType)
+        || MimeTypes.AUDIO_DTS_HD.equals(mimeType);
+    boolean transcodeToAc3 = forceOpticalPassthrough && isDtsFamily;
     int initialInputBufferSize =
         format.maxInputSize != Format.NO_VALUE ? format.maxInputSize : DEFAULT_INPUT_BUFFER_SIZE;
     @C.PcmEncoding int outputEncoding;

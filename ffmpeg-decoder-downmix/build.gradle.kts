@@ -1,42 +1,13 @@
-import java.util.Properties
-
 plugins {
     id("com.android.library")
 }
 
-val localProperties = Properties().apply {
-    val localPropertiesFile = rootProject.file("local.properties")
-    if (localPropertiesFile.exists()) {
-        load(localPropertiesFile.inputStream())
-    }
-}
-
-fun localPath(name: String): String? {
-    return providers.environmentVariable(name).orNull
-        ?: localProperties.getProperty(name)
-}
-
-val ffmpegSourceDir = localPath("FFMPEG_SOURCE_DIR")
-val ffmpegBuildDir = localPath("FFMPEG_BUILD_DIR")
-
 android {
     namespace = "androidx.media3.decoder.ffmpeg"
     compileSdk = 36
-    ndkVersion = "29.0.14206865"
 
     defaultConfig {
         minSdk = 24
-
-        externalNativeBuild {
-            cmake {
-                if (!ffmpegSourceDir.isNullOrBlank() && !ffmpegBuildDir.isNullOrBlank()) {
-                    arguments += listOf(
-                        "-DFFMPEG_SOURCE_DIR=$ffmpegSourceDir",
-                        "-DFFMPEG_BUILD_DIR=$ffmpegBuildDir"
-                    )
-                }
-            }
-        }
     }
 
     compileOptions {
@@ -48,10 +19,9 @@ android {
         buildConfig = false
     }
 
-    externalNativeBuild {
-        cmake {
-            path = file("src/main/jni/CMakeLists.txt")
-            version = "3.22.1"
+    sourceSets {
+        getByName("main") {
+            jniLibs.srcDirs("src/main/jniLibs")
         }
     }
 }

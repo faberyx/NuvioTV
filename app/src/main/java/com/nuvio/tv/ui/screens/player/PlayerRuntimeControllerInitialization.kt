@@ -2170,12 +2170,11 @@ private class SubtitleOffsetRenderersFactory(
         val builder = when {
             bluetoothForcePcm -> {
                 DefaultAudioSink.Builder()
-                    .setAudioCapabilities(AudioOutputRouteDetector.bluetoothPcmOnlyCapabilities())
+                    .setAudioCapabilities(
+                        AudioOutputRouteDetector.bluetoothPcmOnlyCapabilities()
+                    )
             }
-            forceOpticalPassthrough -> {
-                DefaultAudioSink.Builder(context)
-                    .setAudioCapabilities(buildStableAudioCapabilities(context, true))
-            }
+
             else -> DefaultAudioSink.Builder(context)
         }
             .setEnableFloatOutput(enableFloatOutput)
@@ -2259,6 +2258,7 @@ private class SubtitleOffsetRenderersFactory(
 
     private fun applyFfmpegRendererSettings(out: ArrayList<Renderer>) {
         val ffmpegRenderers = out.filterIsInstance<FfmpegAudioRenderer>()
+
         ffmpegRenderers.forEach { renderer ->
             renderer.applyDownmixSettings(
                 downmixEnabled = downmixEnabled,
@@ -2267,6 +2267,7 @@ private class SubtitleOffsetRenderersFactory(
                 forceOpticalPassthrough = forceOpticalPassthrough
             )
         }
+
         onFfmpegAudioRendererChanged(ffmpegRenderers.firstOrNull())
     }
 }
