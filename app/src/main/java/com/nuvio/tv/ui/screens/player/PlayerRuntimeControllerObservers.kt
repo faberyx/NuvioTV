@@ -75,7 +75,7 @@ internal suspend fun PlayerRuntimeController.fetchAddonSubtitlesNow(
                         contentLanguage = contentLanguage,
                         year = year
                     )
-                } else if (currentStreamUrl.isNotBlank()) {
+                } else if (currentStreamUrl.isNotBlank() && !isServerStream) {
                     streamLinkCacheDataStore.save(
                         contentKey = key,
                         url = currentStreamUrl,
@@ -274,19 +274,23 @@ internal fun PlayerRuntimeController.observeBlurUnwatchedEpisodes() {
     }
 }
 
+internal fun PlayerRuntimeController.observeEpisodeOptionsOverlayStyle() {
+    scope.launch {
+        layoutPreferenceDataStore.episodeOptionsOverlayStyle.collectLatest { style ->
+            _uiState.update { it.copy(episodeOptionsOverlayStyle = style) }
+        }
+    }
+}
+
 internal fun PlayerRuntimeController.observeEpisodeWatchProgress() {
     val id = contentId ?: return
     val type = contentType ?: return
-    if (type.lowercase() != "series") return
-    val baseId = id.split(":").firstOrNull() ?: id
+    if (!type.equals("series", true) && !type.equals("tv", true)) return
     scope.launch {
-        watchProgressRepository.getAllEpisodeProgress(baseId, profileId).collectLatest { progressMap ->
-            _uiState.update { it.copy(episodeWatchProgressMap = progressMap) }
-        }
-    }
-    scope.launch {
-        watchedItemsPreferences.getWatchedEpisodesForContent(baseId, profileId).collectLatest { watchedSet ->
-            _uiState.update { it.copy(watchedEpisodeKeys = watchedSet) }
+        episodeShufflePlayback.observe(profileId, id, type).collectLatest { state ->
+            playbackShuffleState = state
+            _uiState.update { it.copy(episodeWatchProgressMap = state.progress, watchedEpisodeKeys = state.watched) }
+            recomputeNextEpisode(resetVisibility = false)
         }
     }
 }
@@ -372,12 +376,7 @@ internal fun PlayerRuntimeController.observeSubtitleSettings() {
             if (settings.frameRateMatchingMode == FrameRateMatchingMode.OFF) {
                 frameRateProbeJob?.cancel()
                 _uiState.update {
-                    it.copy(
-                        detectedFrameRateRaw = 0f,
-                        detectedFrameRate = 0f,
-                        detectedFrameRateSource = null,
-                        afrProbeRunning = false
-                    )
+                    it.clearFrameRateDetection().copy(afrProbeRunning = false)
                 }
             }
 
@@ -394,6 +393,8 @@ internal fun PlayerRuntimeController.observeSubtitleSettings() {
             currentInternalPlayerEngine = resolvedInternalPlayerEngine
             streamAutoPlayModeSetting = settings.streamAutoPlayMode
             streamAutoPlayNextEpisodeEnabledSetting = settings.streamAutoPlayNextEpisodeEnabled
+            streamAutoPlayTimeoutSecondsSetting = settings.streamAutoPlayTimeoutSeconds
+            preloadNextEpisodeSourcesSetting = settings.preloadNextEpisodeSources
             _uiState.update {
                 it.copy(
                     streamAutoPlayMode = settings.streamAutoPlayMode,
@@ -506,7 +507,7 @@ internal fun PlayerRuntimeController.loadSavedProgressFor(season: Int?, episode:
 
     scope.launch {
         pendingResumeProgress = null
-        val progress = if (isCloudLibraryPlayback) {
+        val local = if (isCloudLibraryPlayback) {
             loadCloudLibraryResumeProgress()
         } else if (season != null && episode != null) {
             watchProgressRepository.getEpisodeProgress(
@@ -518,6 +519,7 @@ internal fun PlayerRuntimeController.loadSavedProgressFor(season: Int?, episode:
         } else {
             watchProgressRepository.getProgress(progressContentId!!, profileId).firstOrNull()
         }
+        val progress = newerServerProgress(local)
 
         progress?.let { saved ->
 
@@ -555,7 +557,7 @@ internal suspend fun PlayerRuntimeController.loadSavedProgressSuspend(season: In
     if (!isCloudLibraryPlayback && progressContentId == null) return
 
     pendingResumeProgress = null
-    val progress = if (isCloudLibraryPlayback) {
+    val local = if (isCloudLibraryPlayback) {
         loadCloudLibraryResumeProgress()
     } else if (season != null && episode != null) {
         watchProgressRepository.getEpisodeProgress(
@@ -567,6 +569,7 @@ internal suspend fun PlayerRuntimeController.loadSavedProgressSuspend(season: In
     } else {
         watchProgressRepository.getProgress(progressContentId!!, profileId).firstOrNull()
     }
+    val progress = newerServerProgress(local)
 
     progress?.let { saved ->
         if (saved.isInProgress()) {
@@ -612,6 +615,23 @@ internal fun PlayerRuntimeController.fetchSkipIntervals(id: String?, season: Int
     // Prefer videoId over contentId — videoId carries the season/episode-specific ID
     val effectiveId = currentVideoId?.takeIf { it.isNotBlank() } ?: id
 
+    if (contentType.equals("movie", ignoreCase = true)) {
+        val key = "movie:$id:$effectiveId"
+        if (skipIntroFetchedKey == key) return
+        skipIntroFetchedKey = key
+        scope.launch {
+            skipIntervals = withTimeoutOrNull(15_000L) {
+                skipIntroRepository.getMovieSkipIntervals(id, effectiveId)
+            } ?: emptyList()
+        }
+        return
+    }
+
+    val metaImdbId = contentType?.let { type ->
+        metaRepository.getCachedMeta(type, id)?.imdbId
+            ?: metaRepository.getCachedMeta(type, effectiveId.substringBefore(':'))?.imdbId
+    }?.takeIf { it.startsWith("tt") }
+
     // MAL ID format: "mal:57658:1" (malId:episode)
     if (effectiveId.startsWith("mal:")) {
         val parts = effectiveId.split(":")
@@ -620,7 +640,7 @@ internal fun PlayerRuntimeController.fetchSkipIntervals(id: String?, season: Int
         val key = "mal:$malId:$malEpisode"
         if (skipIntroFetchedKey == key) return
         skipIntroFetchedKey = key
-        val imdbId = id?.takeIf { it.startsWith("tt") }
+        val imdbId = id?.takeIf { it.startsWith("tt") } ?: metaImdbId
         scope.launch {
             skipIntervals = withTimeoutOrNull(15_000L) {
                 skipIntroRepository.getSkipIntervalsForMal(malId, malEpisode, imdbId = imdbId, imdbSeason = season, imdbEpisode = episode)
@@ -637,7 +657,7 @@ internal fun PlayerRuntimeController.fetchSkipIntervals(id: String?, season: Int
         val key = "kitsu:$kitsuId:$kitsuEpisode"
         if (skipIntroFetchedKey == key) return
         skipIntroFetchedKey = key
-        val imdbId = id?.takeIf { it.startsWith("tt") }
+        val imdbId = id?.takeIf { it.startsWith("tt") } ?: metaImdbId
         scope.launch {
             skipIntervals = withTimeoutOrNull(15_000L) {
                 skipIntroRepository.getSkipIntervalsForKitsu(kitsuId, kitsuEpisode, imdbId = imdbId, imdbSeason = season, imdbEpisode = episode)
@@ -940,7 +960,7 @@ internal fun PlayerRuntimeController.scheduleDeferredPlayerReinitialize(
     scope.launch {
         yield()
         runCatching {
-            releasePlayer()
+            releasePlayer(flushPlaybackState = true, keepTorrentStream = true)
             initializePlayer(currentStreamUrl, currentHeaders)
         }.onFailure { e ->
             _uiState.update {
@@ -986,6 +1006,32 @@ internal fun PlayerRuntimeController.observeDeviceLocalAspectMode() {
                         "Aspect mode restored from device-local prefs: ${currentState.aspectMode} -> $mode"
                     )
                     _uiState.update { it.copy(aspectMode = mode) }
+                }
+            }
+    }
+}
+
+internal fun PlayerRuntimeController.observeDeviceLocalTransparentLetterbox() {
+    scope.launch {
+        deviceLocalPlayerPreferences.transparentLetterbox
+            .distinctUntilChanged()
+            .collect { enabled ->
+                _uiState.update { it.copy(transparentLetterbox = enabled) }
+            }
+    }
+}
+
+internal fun PlayerRuntimeController.observeDeviceLocalTunneledSurfaceFill() {
+    scope.launch {
+        deviceLocalPlayerPreferences.tunneledSurfaceFill
+            .distinctUntilChanged()
+            .collect { fill ->
+                if (_uiState.value.tunneledSurfaceFill != fill) {
+                    Log.d(
+                        PlayerRuntimeController.TAG,
+                        "Tunneled surface fill restored from device-local prefs: $fill"
+                    )
+                    _uiState.update { it.copy(tunneledSurfaceFill = fill) }
                 }
             }
     }

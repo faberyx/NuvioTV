@@ -6,6 +6,7 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.TrackSelectionOverride
 import com.nuvio.tv.domain.model.Subtitle
+import com.nuvio.tv.ui.screens.player.autosync.AutoSyncSyncedSubtitle
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -410,6 +411,15 @@ internal fun PlayerRuntimeController.addonSubtitleKey(subtitle: Subtitle): Strin
     return "${subtitle.id}|${subtitle.url}"
 }
 
+/** Routes for [SubtitleRoutingDataSourceFactory], keyed by configuration URI. When subtitles share a URI, the first route is used. */
+internal fun PlayerRuntimeController.subtitleRoutes(subtitles: List<Subtitle>): Map<String, SubtitleRoute> =
+    buildMap {
+        subtitles.forEach { subtitle ->
+            val key = toSubtitleConfiguration(subtitle).uri.toString()
+            if (key !in this) put(key, SubtitleRoute(subtitle.url, subtitle.headers))
+        }
+    }
+
 internal fun PlayerRuntimeController.toSubtitleConfiguration(subtitle: Subtitle): MediaItem.SubtitleConfiguration {
     val normalizedLang = PlayerSubtitleUtils.normalizeLanguageCode(subtitle.lang)
     val subtitleMimeType = PlayerSubtitleUtils.mimeTypeFromUrl(subtitle.url)
@@ -446,7 +456,8 @@ internal fun PlayerRuntimeController.selectAddonSubtitle(subtitle: Subtitle) {
         val wasPlaying = isPlaybackCurrentlyPlaying()
         val normalizedLang = PlayerSubtitleUtils.normalizeLanguageCode(subtitle.lang)
         val trackTitle = buildAddonSubtitleTrackId(subtitle)
-        scope.launch {
+        AutoSyncSyncedSubtitle.clear() // AutoSync hook
+        mpvAddonSubtitleSelectionJob = scope.launch {
             val localPath = try {
                 val decodedBody = downloadSubtitleBody(subtitle.url, subtitle.lang, subtitle.headers)
                 val sanitized = SubtitleMojibakeSanitizer.sanitize(decodedBody).toString()
@@ -600,10 +611,12 @@ internal fun PlayerRuntimeController.attachAddonSubtitleViaMediaReload(subtitle:
             url = currentStreamUrl,
             headers = currentHeaders,
             subtitleConfigurations = subtitleConfigurations,
+            subtitleRoutes = subtitleRoutes(_uiState.value.addonSubtitles + subtitle),
             filename = currentFilename,
             responseHeaders = currentStreamResponseHeaders,
             mimeTypeOverride = currentStreamMimeType,
-            audioDelayUsProvider = audioDelayUs::get
+            audioDelayUsProvider = audioDelayUs::get,
+            cacheKey = currentStreamCacheKey
         ),
         currentPosition
     )

@@ -85,14 +85,16 @@ data class ScraperInfo(
     val type: RepositoryType = RepositoryType.NUVIO_JS
 ) {
     fun supportsType(type: String): Boolean {
-        val targetTypes = when (type.lowercase()) {
-            "series" -> listOf("series", "tv", "anime")
-            "other" -> listOf("other", "tv")
-            else -> listOf(type.lowercase())
-        }
-        return supportedTypes.map { it.lowercase() }.any { it in targetTypes }
+        val normalizedType = normalizePluginType(type)
+        return supportedTypes.any { normalizePluginType(it) == normalizedType }
     }
 }
+
+private fun normalizePluginType(value: String): String =
+    when (value.lowercase()) {
+        "series", "show", "other" -> "tv"
+        else -> value.lowercase()
+    }
 
 /**
  * Result from a local scraper execution
@@ -110,7 +112,8 @@ data class LocalScraperResult(
     val peers: Int? = null,
     val infoHash: String? = null,
     val headers: Map<String, String>? = null,
-    val subtitles: List<Subtitle> = emptyList()
+    val subtitles: List<Subtitle> = emptyList(),
+    val audioDelayMs: Int? = null
 )
 
 /**
@@ -174,7 +177,8 @@ fun LocalScraperResult.toStream(scraper: ScraperInfo): com.nuvio.tv.domain.model
             notWebReady = null,
             bingeGroup = "local-plugin-${scraper.id}",
             countryWhitelist = null,
-            proxyHeaders = headers?.let { ProxyHeaders(request = it, response = null) }
+            proxyHeaders = headers?.let { ProxyHeaders(request = it, response = null) },
+            audioDelayMs = audioDelayMs
         ),
         addonName = scraper.name,
         addonLogo = scraper.logo,

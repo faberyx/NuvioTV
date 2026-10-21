@@ -60,9 +60,14 @@ internal fun PlayerRuntimeController.scheduleSourceBadgeApplication() {
                     badgedByKey[s.sourceBadgeMergeKey()] ?: s
                 }
                 val selectedAddon = current.sourceSelectedAddonFilter
+                val fullFiltered = updatedAll.filterByAddon(selectedAddon)
+                sourceFilterFullList = fullFiltered
+                val pageEnd = current.sourceFilteredStreams.size.coerceAtMost(fullFiltered.size)
+                    .coerceAtLeast(SOURCE_FILTER_PAGE_SIZE.coerceAtMost(fullFiltered.size))
                 current.copy(
                     sourceAllStreams = updatedAll,
-                    sourceFilteredStreams = updatedAll.filterByAddon(selectedAddon)
+                    sourceFilteredStreams = if (pageEnd >= fullFiltered.size) fullFiltered
+                        else fullFiltered.subList(0, pageEnd)
                 )
             }
             val coveredAddons = chunk.map { it.addonName }.toSet()
@@ -150,24 +155,37 @@ internal fun PlayerRuntimeController.buildSourceRequestKey(type: String, videoId
     return "$type|$videoId|${season ?: -1}|${episode ?: -1}"
 }
 
+private data class SourceStreamsRequest(
+    val type: String,
+    val videoId: String,
+    val season: Int?,
+    val episode: Int?
+)
+
+private fun PlayerRuntimeController.currentSourceStreamsRequest(): SourceStreamsRequest? =
+    if (contentType in listOf("series", "tv") && currentSeason != null && currentEpisode != null) {
+        SourceStreamsRequest(
+            type = contentType ?: return null,
+            videoId = currentVideoId ?: contentId ?: return null,
+            season = currentSeason,
+            episode = currentEpisode
+        )
+    } else {
+        SourceStreamsRequest(
+            type = contentType ?: "movie",
+            videoId = contentId ?: return null,
+            season = null,
+            episode = null
+        )
+    }
+
 internal fun PlayerRuntimeController.loadSourceStreams(forceRefresh: Boolean) {
     streamRepository.setLocalPluginSearchPaused(false)
-    val type: String
-    val vid: String
-    val seasonArg: Int?
-    val episodeArg: Int?
-
-    if (contentType in listOf("series", "tv") && currentSeason != null && currentEpisode != null) {
-        type = contentType ?: return
-        vid = currentVideoId ?: contentId ?: return
-        seasonArg = currentSeason
-        episodeArg = currentEpisode
-    } else {
-        type = contentType ?: "movie"
-        vid = contentId ?: return
-        seasonArg = null
-        episodeArg = null
-    }
+    val request = currentSourceStreamsRequest() ?: return
+    val type = request.type
+    val vid = request.videoId
+    val seasonArg = request.season
+    val episodeArg = request.episode
 
     val requestKey = buildSourceRequestKey(type = type, videoId = vid, season = seasonArg, episode = episodeArg)
     val state = _uiState.value
@@ -205,9 +223,10 @@ internal fun PlayerRuntimeController.loadSourceStreams(forceRefresh: Boolean) {
             )
         }
 
-        val installedAddons = addonRepository.getInstalledAddons().first().enabledAddons()
+        val installedAddons = streamAddonsFor(vid)
         val installedAddonOrder = installedAddons.map { it.displayName }
         val installedAddonNames = installedAddonOrder.toSet()
+        val preferredServerNames = serverStreams.preferredSourceNames(type, vid)
         var debridPreparationLaunched = false
 
         // On resume, skip chip reset — keep existing chip statuses
@@ -224,7 +243,7 @@ internal fun PlayerRuntimeController.loadSourceStreams(forceRefresh: Boolean) {
         ).collect { result ->
             when (result) {
                 is NetworkResult.Success -> {
-                    val addonStreams = StreamAutoPlaySelector.orderAddonStreams(result.data, installedAddonOrder)
+                    val addonStreams = StreamAutoPlaySelector.orderAddonStreams(result.data, installedAddonOrder, preferredServerNames)
                     val allStreams = addonStreams.flatMap { it.streams }
                     val availableAddons = addonStreams.map { it.addonName }
                     _uiState.update {
@@ -257,10 +276,16 @@ internal fun PlayerRuntimeController.loadSourceStreams(forceRefresh: Boolean) {
                         } else {
                             badgePreserved.filter { stream -> stream.addonName == selectedAddon }
                         }
+                        sourceFilterFullList = filteredStreams
+                        val paginatedStreams = if (filteredStreams.size > SOURCE_FILTER_PAGE_SIZE) {
+                            filteredStreams.subList(0, SOURCE_FILTER_PAGE_SIZE)
+                        } else {
+                            filteredStreams
+                        }
                         it.copy(
                             isLoadingSourceStreams = false,
                             sourceAllStreams = badgePreserved,
-                            sourceFilteredStreams = filteredStreams,
+                            sourceFilteredStreams = paginatedStreams,
                             sourceAvailableAddons = mergedAvailableAddons,
                             sourceChips = mergeSourceChipStatuses(
                                 existing = it.sourceChips,
@@ -353,9 +378,14 @@ private fun PlayerRuntimeController.replacePreparedSourceStream(
             state
         } else {
             val selectedAddon = state.sourceSelectedAddonFilter
+            val fullFiltered = updatedStreams.filterByAddon(selectedAddon)
+            sourceFilterFullList = fullFiltered
+            val pageEnd = state.sourceFilteredStreams.size.coerceAtMost(fullFiltered.size)
+                .coerceAtLeast(SOURCE_FILTER_PAGE_SIZE.coerceAtMost(fullFiltered.size))
             state.copy(
                 sourceAllStreams = updatedStreams,
-                sourceFilteredStreams = updatedStreams.filterByAddon(selectedAddon)
+                sourceFilteredStreams = if (pageEnd >= fullFiltered.size) fullFiltered
+                    else fullFiltered.subList(0, pageEnd)
             )
         }
     }
@@ -378,18 +408,36 @@ internal fun PlayerRuntimeController.dismissSourcesPanel() {
 
 internal fun PlayerRuntimeController.filterSourceStreamsByAddon(addonName: String?) {
     val allStreams = _uiState.value.sourceAllStreams
-    val filteredStreams = if (addonName == null) {
+    val fullFiltered = if (addonName == null) {
         allStreams
     } else {
         allStreams.filter { it.addonName == addonName }
     }
+    sourceFilterFullList = fullFiltered
+    val paginatedStreams = if (fullFiltered.size > SOURCE_FILTER_PAGE_SIZE) {
+        fullFiltered.subList(0, SOURCE_FILTER_PAGE_SIZE)
+    } else {
+        fullFiltered
+    }
     _uiState.update {
         it.copy(
             sourceSelectedAddonFilter = addonName,
-            sourceFilteredStreams = filteredStreams
+            sourceFilteredStreams = paginatedStreams
         )
     }
 }
+
+internal fun PlayerRuntimeController.expandSourceFilteredStreamsIfNeeded() {
+    val current = _uiState.value.sourceFilteredStreams
+    val full = sourceFilterFullList
+    if (current.size >= full.size) return
+    val nextEnd = (current.size + SOURCE_FILTER_PAGE_SIZE).coerceAtMost(full.size)
+    _uiState.update {
+        it.copy(sourceFilteredStreams = full.subList(0, nextEnd))
+    }
+}
+
+private const val SOURCE_FILTER_PAGE_SIZE = 100
 
 private suspend fun PlayerRuntimeController.updateSourceChipsForFetchStart(
     type: String,
@@ -401,7 +449,7 @@ private suspend fun PlayerRuntimeController.updateSourceChipsForFetchStart(
         .map { it.displayName }
 
     val pluginNames = try {
-        if (pluginManager.pluginsEnabled.first()) {
+        if (!serverStreams.isNativeRequest(videoId) && pluginManager.pluginsEnabled.first()) {
             val mediaType = when (type.lowercase()) {
                 "series", "tv", "show" -> "tv"
                 else -> type.lowercase()
@@ -428,7 +476,7 @@ private suspend fun PlayerRuntimeController.updateSourceChipsForFetchStart(
         emptyList()
     }
 
-    val ordered = (addonNames + pluginNames).distinct()
+    val ordered = (serverSourceNames(type, videoId) + addonNames + pluginNames).distinct()
     _uiState.update {
         it.copy(
             sourceChips = ordered.map { name -> SourceChipItem(name, SourceChipStatus.LOADING) }
@@ -495,7 +543,7 @@ private suspend fun PlayerRuntimeController.updateEpisodeSourceChipsForFetchStar
         .map { it.displayName }
 
     val pluginNames = try {
-        if (pluginManager.pluginsEnabled.first()) {
+        if (!serverStreams.isNativeRequest(videoId) && pluginManager.pluginsEnabled.first()) {
             val mediaType = when (type.lowercase()) {
                 "series", "tv", "show" -> "tv"
                 else -> type.lowercase()
@@ -522,7 +570,7 @@ private suspend fun PlayerRuntimeController.updateEpisodeSourceChipsForFetchStar
         emptyList()
     }
 
-    val ordered = (addonNames + pluginNames).distinct()
+    val ordered = (serverSourceNames(type, videoId) + addonNames + pluginNames).distinct()
     _uiState.update {
         it.copy(
             episodeSourceChips = ordered.map { name -> SourceChipItem(name, SourceChipStatus.LOADING) }
@@ -569,6 +617,12 @@ private fun com.nuvio.tv.domain.model.Addon.supportsStreamResourceForChip(type: 
     }
 }
 
+// The launch stream's filename belongs to that stream only, so a newly selected stream without a
+// filename hint falls back to its own url rather than inheriting it.
+internal fun streamFilenameFromUrl(url: String): String? =
+    url.substringBefore('?').substringAfterLast('/', "")
+        .takeIf { it.isNotBlank() && it.contains('.') }
+
 private fun PlayerRuntimeController.applySelectedStreamState(
     stream: Stream,
     url: String,
@@ -577,13 +631,19 @@ private fun PlayerRuntimeController.applySelectedStreamState(
     val playbackRequest = PlayerMediaSourceFactory.normalizePlaybackRequest(url, headers)
     currentStreamUrl = playbackRequest.url
     currentHeaders = playbackRequest.headers
-    currentFilename = stream.behaviorHints?.filename ?: navigationArgs.filename
+    currentFilename = stream.behaviorHints?.filename ?: streamFilenameFromUrl(playbackRequest.url)
     currentStreamResponseHeaders = stream.behaviorHints?.proxyHeaders?.response.orEmpty()
     currentStreamMimeType = PlayerMediaSourceFactory.inferMimeType(
         url = playbackRequest.url,
         filename = currentFilename,
         responseHeaders = currentStreamResponseHeaders
     )
+    // A source switch mints a new debrid link for the same file, and without a file index a
+    // multi-file torrent could hand one file's bytes to another, so that case keys on the url.
+    val fileIdx = stream.getEffectiveFileIdx()
+    currentStreamCacheKey = stream.getEffectiveInfoHash()?.lowercase()?.takeIf { fileIdx != null }?.let { hash ->
+        "$hash:$fileIdx"
+    }
     parsingErrorProbeAttempted = false
     applyStreamMetadata(stream)
 }
@@ -595,6 +655,7 @@ private fun PlayerRuntimeController.applySelectedStreamState(
  */
 private fun PlayerRuntimeController.applyStreamMetadata(stream: Stream) {
     currentStreamBingeGroup = stream.behaviorHints?.bingeGroup
+    applyStreamAudioDelay(stream.behaviorHints?.audioDelayMs)
     currentVideoHash = stream.behaviorHints?.videoHash
     currentVideoSize = stream.behaviorHints?.videoSize
     streamSubtitles = stream.subtitles
@@ -605,15 +666,73 @@ private fun PlayerRuntimeController.applyStreamMetadata(stream: Stream) {
     currentVideoWidth = null
     currentVideoHeight = null
     currentVideoBitrate = null
+    persistBingeGroup(stream.behaviorHints?.bingeGroup, stream.behaviorHints?.filename, stream.infoHash)
+}
 
-    // Persist binge group per content so subsequent episode plays
-    // (from CW, Details, or next-episode) can reuse the same source group.
-    val bg = stream.behaviorHints?.bingeGroup
+// Persist binge group per content so subsequent episode plays
+// (from CW, Details, or next-episode) can reuse the same source group.
+private fun PlayerRuntimeController.persistBingeGroup(bingeGroup: String?, filename: String? = null, infoHash: String? = null) {
     val cid = contentId
     if (cid != null) {
         scope.launch(kotlinx.coroutines.NonCancellable) {
-            bingeGroupCacheDataStore.replace(cid, bg)
+            bingeGroupCacheDataStore.replace(cid, bingeGroup, filename, infoHash)
         }
+    }
+}
+
+/**
+ * Moves the stream metadata onto the release an addon redirected playback to.
+ *
+ * Some addons fail over by redirecting the player to the next stream they listed, and the player
+ * follows that silently, so without this the stream info, the filename hints and the saved link
+ * keep describing the stream that never opened. The target is looked up
+ * only among streams already in memory: a search started here would compete with playback.
+ */
+internal fun PlayerRuntimeController.handleStreamRedirect(requestedUrl: String, resolvedUrl: String) {
+    scope.launch {
+        if (requestedUrl != currentStreamUrl) return@launch
+        val addonName = currentAddonName
+        val target = findRedirectTargetStream(_uiState.value.sourceAllStreams, addonName, requestedUrl, resolvedUrl)
+            ?: currentSourceStreamsRequest()?.let { request ->
+                streamRepository.getCachedStreamsFromAllAddons(
+                    type = request.type,
+                    videoId = request.videoId,
+                    season = request.season,
+                    episode = request.episode
+                )?.let { cached ->
+                    findRedirectTargetStream(cached.flatMap { it.streams }, addonName, requestedUrl, resolvedUrl)
+                }
+            }
+        if (target == null) {
+            Log.d(PlayerRuntimeController.TAG, "Stream redirect matched no listed stream")
+            return@launch
+        }
+        // The lookup suspends, so the user may have switched streams meanwhile.
+        if (requestedUrl != currentStreamUrl) return@launch
+        Log.i(
+            PlayerRuntimeController.TAG,
+            "Stream redirected to another listed release, now showing ${target.name ?: target.addonName}"
+        )
+        currentFilename = target.behaviorHints?.filename
+        currentVideoHash = target.behaviorHints?.videoHash
+        currentVideoSize = target.behaviorHints?.videoSize
+        currentStreamBingeGroup = target.behaviorHints?.bingeGroup
+        currentAddonName = target.addonName
+        currentAddonLogo = target.addonLogo
+        currentStreamDescription = target.description
+        persistBingeGroup(currentStreamBingeGroup)
+        _uiState.update {
+            it.copy(
+                currentStreamName = target.name ?: target.addonName,
+                currentStreamAddonName = target.addonName
+            )
+        }
+        // The saved link points at the release that played, so a resume goes straight to it.
+        val targetRequest = PlayerMediaSourceFactory.normalizePlaybackRequest(
+            target.getStreamUrl() ?: resolvedUrl,
+            currentHeaders
+        )
+        persistSelectedStreamForReuse(stream = target, url = targetRequest.url, headers = targetRequest.headers)
     }
 }
 
@@ -622,7 +741,7 @@ private fun PlayerRuntimeController.persistSelectedStreamForReuse(
     url: String,
     headers: Map<String, String>
 ) {
-    if (!streamReuseLastLinkEnabled) return
+    if (!streamReuseLastLinkEnabled || stream.serverTarget != null) return
 
     val key = streamCacheKey ?: return
     val streamName = (stream.name?.takeIf { it.isNotBlank() } ?: stream.addonName)?.takeIf { it.isNotBlank() }
@@ -639,7 +758,8 @@ private fun PlayerRuntimeController.persistSelectedStreamForReuse(
             videoSize = currentVideoSize,
             bingeGroup = stream.behaviorHints?.bingeGroup,
             contentLanguage = contentLanguage,
-            year = year
+            year = year,
+            audioDelayMs = stream.behaviorHints?.audioDelayMs
         )
     }
 }
@@ -666,7 +786,8 @@ private fun PlayerRuntimeController.persistTorrentStreamForReuse(stream: Stream)
             sources = stream.sources,
             bingeGroup = stream.behaviorHints?.bingeGroup,
             contentLanguage = contentLanguage,
-            year = year
+            year = year,
+            audioDelayMs = stream.behaviorHints?.audioDelayMs
         )
     }
 }
@@ -734,6 +855,41 @@ internal fun PlayerRuntimeController.switchToSourceStream(
     sourceStreamsJob = null
     streamRepository.setLocalPluginSearchPaused(true)
     if (openExternalStreamInBrowser(stream = stream, fromEpisodePanel = false)) {
+        return
+    }
+
+    if (stream.serverTarget != null && stream.getStreamUrl().isNullOrBlank()) {
+        debridResolveJob?.cancel()
+        _uiState.update { it.copy(isLoadingSourceStreams = true, sourceStreamsError = null) }
+        debridResolveJob = scope.launch {
+            val prepared = prepareServerStream(stream)
+            debridResolveJob = null
+            if (prepared != null) {
+                switchToSourceStream(prepared)
+            } else {
+                _uiState.update { it.copy(isLoadingSourceStreams = false) }
+            }
+        }
+        return
+    }
+
+    if (stream.youTubeIdToResolve() != null) {
+        debridResolveJob?.cancel()
+        _uiState.update { it.copy(isLoadingSourceStreams = true, sourceStreamsError = null) }
+        debridResolveJob = scope.launch {
+            val resolved = resolveYouTubeStream(stream)
+            debridResolveJob = null
+            if (resolved != null) {
+                switchToSourceStream(resolved)
+            } else {
+                _uiState.update {
+                    it.copy(
+                        isLoadingSourceStreams = false,
+                        sourceStreamsError = context.getString(com.nuvio.tv.R.string.youtube_resolution_failed)
+                    )
+                }
+            }
+        }
         return
     }
 
@@ -822,7 +978,7 @@ internal fun PlayerRuntimeController.switchToSourceStream(
     resetLoadingOverlayForNewStream()
 
     _uiState.update {
-        it.copy(
+        it.clearFrameRateDetection().copy(
             isBuffering = true,
             error = null,
             currentStreamName = stream.name ?: stream.addonName,
@@ -834,6 +990,8 @@ internal fun PlayerRuntimeController.switchToSourceStream(
             subtitleTracks = emptyList(),
             selectedAudioTrackIndex = -1,
             selectedSubtitleTrackIndex = -1,
+            chapters = emptyList(),
+            showChaptersPanel = false,
             showSourcesPanel = false,
             isLoadingSourceStreams = false,
             sourceStreamsError = null,
@@ -862,7 +1020,8 @@ internal fun PlayerRuntimeController.switchToSourceStream(
                         filename = currentFilename,
                         responseHeaders = currentStreamResponseHeaders,
                         mimeTypeOverride = currentStreamMimeType,
-                        audioDelayUsProvider = audioDelayUs::get
+                        audioDelayUsProvider = audioDelayUs::get,
+                        cacheKey = currentStreamCacheKey
                     )
                 )
                 player.playWhenReady = true
@@ -933,7 +1092,7 @@ private fun PlayerRuntimeController.switchToTorrentSourceStream(
     pendingRestoredAddonSubtitle = null
     lastSavedPosition = 0L
     _uiState.update {
-        it.copy(
+        it.clearFrameRateDetection().copy(
             isBuffering = true,
             error = null,
             currentStreamName = stream.name ?: stream.addonName,
@@ -945,6 +1104,8 @@ private fun PlayerRuntimeController.switchToTorrentSourceStream(
             subtitleTracks = emptyList(),
             selectedAudioTrackIndex = -1,
             selectedSubtitleTrackIndex = -1,
+            chapters = emptyList(),
+            showChaptersPanel = false,
             showSourcesPanel = false,
             isLoadingSourceStreams = false,
             sourceStreamsError = null,
@@ -952,7 +1113,7 @@ private fun PlayerRuntimeController.switchToTorrentSourceStream(
         )
     }
     applyStreamMetadata(stream)
-    currentFilename = stream.behaviorHints?.filename ?: navigationArgs.filename
+    currentFilename = stream.behaviorHints?.filename
     showStreamSourceIndicator(stream)
     resetPostPlayOverlayState(clearEpisode = false)
     launchTorrentSourceStream(stream, infoHash, loadSavedProgress = true)
@@ -1096,9 +1257,10 @@ internal fun PlayerRuntimeController.loadStreamsForEpisode(video: Video, forceRe
             )
         }
 
-        val installedAddons = addonRepository.getInstalledAddons().first().enabledAddons()
+        val installedAddons = streamAddonsFor(video.id)
         val installedAddonOrder = installedAddons.map { it.displayName }
         val installedAddonNames = installedAddonOrder.toSet()
+        val preferredServerNames = serverStreams.preferredSourceNames(type, video.id)
         var debridPreparationLaunched = false
 
         // Initialize episode source chips with LOADING status
@@ -1113,7 +1275,7 @@ internal fun PlayerRuntimeController.loadStreamsForEpisode(video: Video, forceRe
         ).collect { result ->
             when (result) {
                 is NetworkResult.Success -> {
-                    val addonStreams = StreamAutoPlaySelector.orderAddonStreams(result.data, installedAddonOrder)
+                    val addonStreams = StreamAutoPlaySelector.orderAddonStreams(result.data, installedAddonOrder, preferredServerNames)
                     val allStreams = addonStreams.flatMap { it.streams }
                     val availableAddons = addonStreams.map { it.addonName }
                     val currentFilter = _uiState.value.episodeSelectedAddonFilter
@@ -1265,6 +1427,41 @@ internal fun PlayerRuntimeController.switchToEpisodeStream(
         return
     }
 
+    if (stream.serverTarget != null && stream.getStreamUrl().isNullOrBlank()) {
+        debridResolveJob?.cancel()
+        _uiState.update { it.copy(isLoadingEpisodeStreams = true, episodeStreamsError = null) }
+        debridResolveJob = scope.launch {
+            val prepared = prepareServerStream(stream)
+            debridResolveJob = null
+            if (prepared != null) {
+                switchToEpisodeStream(prepared, forcedTargetVideo, isAutoPlay)
+            } else {
+                _uiState.update { it.copy(isLoadingEpisodeStreams = false) }
+            }
+        }
+        return
+    }
+
+    if (stream.youTubeIdToResolve() != null) {
+        debridResolveJob?.cancel()
+        _uiState.update { it.copy(isLoadingEpisodeStreams = true, episodeStreamsError = null) }
+        debridResolveJob = scope.launch {
+            val resolved = resolveYouTubeStream(stream)
+            debridResolveJob = null
+            if (resolved != null) {
+                switchToEpisodeStream(resolved, forcedTargetVideo, isAutoPlay)
+            } else {
+                _uiState.update {
+                    it.copy(
+                        isLoadingEpisodeStreams = false,
+                        episodeStreamsError = context.getString(com.nuvio.tv.R.string.youtube_resolution_failed)
+                    )
+                }
+            }
+        }
+        return
+    }
+
     if (stream.isTorrent()) {
         val resolveSeason = forcedTargetVideo?.season ?: _uiState.value.episodeStreamsSeason ?: currentSeason
         val resolveEpisode = forcedTargetVideo?.episode ?: _uiState.value.episodeStreamsEpisode ?: currentEpisode
@@ -1335,6 +1532,7 @@ internal fun PlayerRuntimeController.switchToEpisodeStream(
     // Pause current playback immediately so the old stream doesn't continue
     // playing audio/video in the background while the new episode is being prepared.
     _exoPlayer?.stop()
+    cancelAfrPreflight()
 
     val newHeaders = PlayerMediaSourceFactory.sanitizeHeaders(
         stream.behaviorHints?.proxyHeaders?.request
@@ -1345,9 +1543,6 @@ internal fun PlayerRuntimeController.switchToEpisodeStream(
     currentStreamBingeGroup = stream.behaviorHints?.bingeGroup
     currentVideoHash = stream.behaviorHints?.videoHash
     currentVideoSize = stream.behaviorHints?.videoSize
-    currentFilename = stream.behaviorHints?.filename
-        ?: url.substringBefore('?').substringAfterLast('/', "")
-            .takeIf { it.isNotBlank() && it.contains('.') }
     pendingAddonSubtitleLanguage = null
     pendingAddonSubtitleTrackId = null
     pendingAudioSelectionAfterSubtitleRefresh = null
@@ -1376,6 +1571,8 @@ internal fun PlayerRuntimeController.switchToEpisodeStream(
     currentEpisode = targetVideo?.episode ?: _uiState.value.episodeStreamsEpisode ?: currentEpisode
     currentEpisodeTitle = targetVideo?.title ?: _uiState.value.episodeStreamsTitle ?: currentEpisodeTitle
     // Until the new file loads, MPV keeps reporting the old one, which is often at its end.
+    hasRenderedFirstFrame = false
+    mpvView?.markMediaRequested(playbackUrl)
     endDetectionArmed = false
     mpvEofSeenClear = false
     currentTraktEpisodeMapping = null
@@ -1383,7 +1580,7 @@ internal fun PlayerRuntimeController.switchToEpisodeStream(
     lastSavedPosition = 0L
 
     _uiState.update {
-        it.copy(
+        it.clearFrameRateDetection().copy(
             isBuffering = true,
             error = null,
             currentSeason = currentSeason,
@@ -1399,6 +1596,8 @@ internal fun PlayerRuntimeController.switchToEpisodeStream(
             subtitleTracks = emptyList(),
             selectedAudioTrackIndex = -1,
             selectedSubtitleTrackIndex = -1,
+            chapters = emptyList(),
+            showChaptersPanel = false,
             showEpisodesPanel = false,
             showEpisodeStreams = false,
             isLoadingEpisodeStreams = false,
@@ -1474,7 +1673,7 @@ private fun PlayerRuntimeController.switchToEpisodeStreamCommon(
     releasePlayer(flushPlaybackState = false)
 
     applyStreamMetadata(stream)
-    currentFilename = stream.behaviorHints?.filename ?: navigationArgs.filename
+    currentFilename = stream.behaviorHints?.filename
 
     persistedTrackPreference = null
     subtitleDisabledByPersistedPreference = false
@@ -1496,7 +1695,7 @@ private fun PlayerRuntimeController.switchToEpisodeStreamCommon(
     resetLoadingOverlayForNewStream()
 
     _uiState.update {
-        it.copy(
+        it.clearFrameRateDetection().copy(
             isBuffering = true,
             error = null,
             currentSeason = currentSeason,
@@ -1511,6 +1710,8 @@ private fun PlayerRuntimeController.switchToEpisodeStreamCommon(
             subtitleTracks = emptyList(),
             selectedAudioTrackIndex = -1,
             selectedSubtitleTrackIndex = -1,
+            chapters = emptyList(),
+            showChaptersPanel = false,
             showEpisodesPanel = false,
             showEpisodeStreams = false,
             isLoadingEpisodeStreams = false,
@@ -1564,6 +1765,21 @@ internal fun PlayerRuntimeController.showEpisodeStreamPicker(video: Video, force
     loadStreamsForEpisode(video = video, forceRefresh = forceRefresh)
 }
 
+internal suspend fun PlayerRuntimeController.resolveYouTubeStream(stream: Stream): Stream? {
+    recordLoadingDiagnosticEvent(
+        phase = "resolving_youtube",
+        message = context.getString(com.nuvio.tv.R.string.youtube_resolving_stream),
+        detail = stream.addonName
+    )
+    val resolved = youTubeStreamResolver.resolve(stream)
+    recordLoadingDiagnosticEvent(
+        phase = if (resolved != null) "resolving_youtube_done" else "resolving_youtube_failed",
+        message = context.getString(com.nuvio.tv.R.string.youtube_resolving_stream),
+        detail = stream.addonName
+    )
+    return resolved
+}
+
 internal suspend fun PlayerRuntimeController.resolveDirectDebridStreamIfNeeded(
     stream: Stream,
     season: Int?,
@@ -1597,9 +1813,45 @@ internal suspend fun PlayerRuntimeController.resolveDirectDebridStreamIfNeeded(
     }
 }
 
-internal fun PlayerRuntimeController.playNextEpisode(userInitiated: Boolean = false) {
+/**
+ * Starts fetching addon streams for the next episode in the background.
+ * Results are stored in [StreamSearchSessionCache] so that the subsequent
+ * [playNextEpisode] call hits the cache and plays instantly.
+ */
+internal fun PlayerRuntimeController.preloadNextEpisodeSources() {
+    if (nextEpisodePreloadTriggered) return
     val nextVideo = nextEpisodeVideo ?: return
     val type = contentType ?: return
+    val nextInfo = _uiState.value.nextEpisode ?: return
+    if (!nextInfo.hasAired) return
+
+    nextEpisodePreloadTriggered = true
+    nextEpisodePreloadJob?.cancel()
+    nextEpisodePreloadJob = scope.launch {
+        Log.d(PlayerRuntimeController.TAG, "Preloading sources for next episode: S${nextVideo.season}E${nextVideo.episode}")
+        streamRepository.getStreamsFromAllAddons(
+            type = type,
+            videoId = nextVideo.id,
+            season = nextVideo.season,
+            episode = nextVideo.episode
+        ).collect { /* results cached by StreamSearchSessionCache */ }
+    }
+}
+
+internal fun PlayerRuntimeController.cancelNextEpisodePreload() {
+    nextEpisodePreloadJob?.cancel()
+    nextEpisodePreloadJob = null
+    nextEpisodePreloadTriggered = false
+}
+
+internal fun PlayerRuntimeController.playNextEpisode(userInitiated: Boolean = false) {
+    if (isPartyControlLocked) {
+        if (userInitiated) partyBlocksControl()
+        return
+    }
+    val nextVideo = nextEpisodeVideo ?: return
+    val type = contentType ?: return
+    nextEpisodePreloadTriggered = false
 
     val state = _uiState.value
     val nextInfo = state.nextEpisode ?: return
@@ -1656,8 +1908,9 @@ internal fun PlayerRuntimeController.playNextEpisode(userInitiated: Boolean = fa
                 return@launch
             }
 
-            val installedAddons = addonRepository.getInstalledAddons().first().enabledAddons()
+            val installedAddons = streamAddonsFor(nextVideo.id)
             val installedAddonOrder = installedAddons.map { it.displayName }
+            val preferredServerNames = serverStreams.preferredSourceNames(type, nextVideo.id)
             val effectiveMode = if (shouldAutoSelectInManualMode) {
                 StreamAutoPlayMode.FIRST_STREAM
             } else {
@@ -1693,7 +1946,7 @@ internal fun PlayerRuntimeController.playNextEpisode(userInitiated: Boolean = fa
             val searchSettled = CompletableDeferred<Unit>()
 
             fun trySelectStream(data: List<AddonStreams>): Stream? {
-                val orderedStreams = StreamAutoPlaySelector.orderAddonStreams(data, installedAddonOrder)
+                val orderedStreams = StreamAutoPlaySelector.orderAddonStreams(data, installedAddonOrder, preferredServerNames)
                 val allStreams = orderedStreams.flatMap { it.streams }
                 return StreamAutoPlaySelector.selectAutoPlayStream(
                     streams = allStreams,
@@ -1715,8 +1968,27 @@ internal fun PlayerRuntimeController.playNextEpisode(userInitiated: Boolean = fa
 
             fun tryBingeGroupOnly(data: List<AddonStreams>): Stream? {
                 if (currentStreamBingeGroup == null || !playerSettings.streamAutoPlayPreferBingeGroupForNextEpisode) return null
-                val orderedStreams = StreamAutoPlaySelector.orderAddonStreams(data, installedAddonOrder)
+                val orderedStreams = StreamAutoPlaySelector.orderAddonStreams(data, installedAddonOrder, preferredServerNames)
                 val allStreams = orderedStreams.flatMap { it.streams }
+                // Early: binge group + filename match (most precise)
+                val nextFilename = com.nuvio.tv.core.player.FilenameEpisodeMatcher.buildNextFilename(
+                    filename = currentFilename.orEmpty(),
+                    currentSeason = _uiState.value.currentSeason,
+                    currentEpisode = _uiState.value.currentEpisode ?: 0,
+                    nextSeason = nextVideo.season,
+                    nextEpisode = nextVideo.episode ?: 0
+                ) ?: currentFilename?.takeIf { it.isNotBlank() }
+                if (nextFilename != null) {
+                    val bingeAndFilename = allStreams.firstOrNull { stream ->
+                        !stream.isExternal() &&
+                            stream.behaviorHints?.bingeGroup == currentStreamBingeGroup &&
+                            com.nuvio.tv.core.player.FilenameEpisodeMatcher.matches(
+                                stream.behaviorHints?.filename, nextFilename
+                            )
+                    }
+                    if (bingeAndFilename != null) return bingeAndFilename
+                }
+                // Early fallback: binge group alone
                 return StreamAutoPlaySelector.selectAutoPlayStream(
                     streams = allStreams,
                     mode = effectiveMode,
@@ -1729,6 +2001,24 @@ internal fun PlayerRuntimeController.playNextEpisode(userInitiated: Boolean = fa
                     preferBingeGroupInSelection = true,
                     bingeGroupOnly = true
                 )
+            }
+
+            fun tryFilenameOnly(data: List<AddonStreams>): Stream? {
+                val nextFilename = com.nuvio.tv.core.player.FilenameEpisodeMatcher.buildNextFilename(
+                    filename = currentFilename.orEmpty(),
+                    currentSeason = _uiState.value.currentSeason,
+                    currentEpisode = _uiState.value.currentEpisode ?: 0,
+                    nextSeason = nextVideo.season,
+                    nextEpisode = nextVideo.episode ?: 0
+                ) ?: currentFilename?.takeIf { it.isNotBlank() }
+                    ?: return null
+                val orderedStreams = StreamAutoPlaySelector.orderAddonStreams(data, installedAddonOrder, preferredServerNames)
+                return orderedStreams.flatMap { it.streams }.firstOrNull { stream ->
+                    !stream.isExternal() &&
+                        com.nuvio.tv.core.player.FilenameEpisodeMatcher.matches(
+                            stream.behaviorHints?.filename, nextFilename
+                        )
+                }
             }
 
             fun recordSelection(candidate: Stream) {
@@ -1777,15 +2067,18 @@ internal fun PlayerRuntimeController.playNextEpisode(userInitiated: Boolean = fa
                 withTimeoutOrNull(timeoutMs) { searchSettled.await() }
                 timeoutElapsed = true
                 if (!autoSelectTriggered) {
+                    // Filename match before full select — same release, any binge group.
+                    lastSuccessData?.let { tryFilenameOnly(it)?.let { s -> recordSelection(s) } }
+                }
+                if (!autoSelectTriggered) {
                     val data = lastSuccessData
                     if (data != null) {
-                        // Streams arrived: full select once. If nothing matches,
-                        // respect the timeout and stop (the caller shows the picker).
                         trySelectStream(data)?.let { recordSelection(it) }
                     } else {
-                        // No addon responded yet: keep waiting for the first usable
-                        // result, bounded so we never hang indefinitely.
                         withTimeoutOrNull(timeoutMs) { searchSettled.await() }
+                        if (!autoSelectTriggered) {
+                            lastSuccessData?.let { tryFilenameOnly(it)?.let { s -> recordSelection(s) } }
+                        }
                         if (!autoSelectTriggered) {
                             lastSuccessData?.let { trySelectStream(it)?.let { s -> recordSelection(s) } }
                         }
@@ -1796,11 +2089,17 @@ internal fun PlayerRuntimeController.playNextEpisode(userInitiated: Boolean = fa
                 timeoutElapsed = true
                 withTimeoutOrNull(NEXT_EPISODE_HARD_TIMEOUT_MS) { searchSettled.await() }
                 if (!autoSelectTriggered) {
+                    lastSuccessData?.let { tryFilenameOnly(it)?.let { s -> recordSelection(s) } }
+                }
+                if (!autoSelectTriggered) {
                     lastSuccessData?.let { data -> trySelectStream(data)?.let { recordSelection(it) } }
                 }
                 innerJob.cancel()
             } else {
                 withTimeoutOrNull(NEXT_EPISODE_HARD_TIMEOUT_MS) { searchSettled.await() }
+                if (!autoSelectTriggered) {
+                    lastSuccessData?.let { tryFilenameOnly(it)?.let { s -> recordSelection(s) } }
+                }
                 if (!autoSelectTriggered) {
                     lastSuccessData?.let { data -> trySelectStream(data)?.let { recordSelection(it) } }
                 }

@@ -22,10 +22,15 @@ class SimklTrackingHistoryWriter @Inject constructor(
         items: Collection<TrackingHistoryItem>
     ): TrackingMutationResult {
         if (profileId != profileManager.activeProfileId.value) return TrackingMutationResult(0)
+        // A mark without episode coordinates describes a whole series, and Simkl answers such a mark by
+        // marking every episode of the show watched. Only films may travel without coordinates; the
+        // episodes of a whole-series action are reported one by one by the caller anyway.
+        val pushableItems = items.filterNot(TrackingHistoryItem::isWholeSeriesMark)
+        if (pushableItems.isEmpty()) return TrackingMutationResult(0)
         syncRepository.ensureLoaded()
         val snapshot = syncRepository.state.value.snapshot
         return service.addToHistory(
-            items.map { item ->
+            pushableItems.map { item ->
                 val enriched = snapshot.enrichMediaReference(item.media)
                 item.copy(media = enriched.resolveAnimeEpisodeForSimkl())
             }

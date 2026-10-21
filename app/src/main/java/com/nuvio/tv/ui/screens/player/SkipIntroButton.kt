@@ -2,6 +2,7 @@
 
 package com.nuvio.tv.ui.screens.player
 
+import com.nuvio.tv.ui.theme.NuvioPrimitives
 import com.nuvio.tv.ui.theme.NuvioTheme
 
 import androidx.compose.animation.AnimatedVisibility
@@ -60,6 +61,7 @@ fun SkipIntroButton(
     interval: SkipInterval?,
     dismissed: Boolean,
     controlsVisible: Boolean,
+    targetsPostCredits: Boolean = false,
     suppressFocus: Boolean = false,
     canFocus: Boolean = true,
     onSkip: () -> Unit,
@@ -192,7 +194,7 @@ fun SkipIntroButton(
                     if (it.isFocused) onFocused?.invoke()
                 },
             colors = CardDefaults.colors(
-                containerColor = Color(0xFF1E1E1E).copy(alpha = 0.85f),
+                containerColor = NuvioPrimitives.neutral875.copy(alpha = 0.85f),
                 focusedContainerColor = NuvioTheme.colors.Secondary
             ),
             shape = CardDefaults.shape(shape = RoundedCornerShape(NuvioTheme.radii.md))
@@ -211,7 +213,7 @@ fun SkipIntroButton(
                         modifier = Modifier.size(20.dp)
                     )
                     Text(
-                        text = getSkipLabel(lastType),
+                        text = getSkipLabel(lastType, targetsPostCredits),
                         color = if (isFocused) NuvioTheme.colors.OnSecondary else Color.White,
                         fontSize = 14.sp,
                         modifier = Modifier.padding(start = NuvioTheme.spacing.sm)
@@ -228,7 +230,7 @@ fun SkipIntroButton(
                         modifier = Modifier
                             .fillMaxWidth(progress.value)
                             .height(NuvioTheme.spacing.xs)
-                            .background(Color(0xFF1E1E1E).copy(alpha = if (controlsVisible || autoHidden || dismissed) 0f else 0.85f))
+                            .background(NuvioPrimitives.neutral875.copy(alpha = if (controlsVisible || autoHidden || dismissed) 0f else 0.85f))
                     )
                 }
             }
@@ -237,9 +239,11 @@ fun SkipIntroButton(
 }
 
 @Composable
-private fun getSkipLabel(type: String?): String = when (type?.trim()?.lowercase()) {
+private fun getSkipLabel(type: String?, targetsPostCredits: Boolean): String = when (type?.trim()?.lowercase()) {
     "op", "opening", "mixed-op", "intro" -> stringResource(R.string.skip_intro)
-    "ed", "ending", "mixed-ed", "outro", "credits" -> stringResource(R.string.skip_ending)
+    "ed", "ending", "mixed-ed", "outro", "credits" ->
+        stringResource(if (targetsPostCredits) R.string.skip_to_post_credits else R.string.skip_ending)
+    "movie-credits" -> stringResource(if (targetsPostCredits) R.string.skip_to_post_credits else R.string.skip_movie_credits)
     "recap" -> stringResource(R.string.skip_recap)
     else -> stringResource(R.string.skip_generic)
 }
