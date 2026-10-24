@@ -14,7 +14,11 @@ export type TvCommand =
   | { cmd: "skip_intro" }
   | { cmd: "stop" }
   | { cmd: "search"; query: string }
-  | { cmd: "play"; query: string };
+  | { cmd: "play"; query: string }
+  | { cmd: "key"; key: RemoteKey; count: number };
+
+export type RemoteKey = "up" | "down" | "left" | "right" | "select";
+const MAX_KEY_REPEAT = 10;
 
 export interface TvReply {
   ok: boolean;
@@ -34,7 +38,36 @@ export interface AlexaResponse {
 
 export type Lang = "it" | "en";
 
-type Slots = Record<string, { value?: string } | undefined>;
+interface Slot {
+  value?: string;
+  resolutions?: {
+    resolutionsPerAuthority?: { status?: { code?: string }; values?: { value?: { id?: string } }[] }[];
+  };
+}
+type Slots = Record<string, Slot | undefined>;
+
+/** Words Alexa may hand back for the DIREZIONE slot when entity resolution has no id. */
+const DIRECTION_WORDS: Record<string, RemoteKey> = {
+  su: "up", sopra: "up", alto: "up", "in alto": "up", up: "up",
+  giu: "down", "giù": "down", sotto: "down", basso: "down", "in basso": "down", down: "down",
+  sinistra: "left", "a sinistra": "left", left: "left",
+  destra: "right", "a destra": "right", right: "right",
+};
+
+/** Canonical id of a custom-slot value (entity resolution first, then the raw words). */
+export function directionOf(slot: Slot | undefined): RemoteKey | null {
+  const resolved = slot?.resolutions?.resolutionsPerAuthority
+    ?.find((a) => a.status?.code === "ER_SUCCESS_MATCH")
+    ?.values?.[0]?.value?.id;
+  if (resolved === "up" || resolved === "down" || resolved === "left" || resolved === "right") return resolved;
+  const raw = slot?.value?.trim().toLowerCase();
+  return raw ? DIRECTION_WORDS[raw] ?? null : null;
+}
+
+function repeatCount(slot: Slot | undefined): number {
+  const n = Math.round(Number(slot?.value));
+  return Number.isFinite(n) && n >= 1 ? Math.min(n, MAX_KEY_REPEAT) : 1;
+}
 
 const DEFAULT_SEEK_FORWARD_MS = 30_000;
 const DEFAULT_SEEK_BACK_MS = 10_000;
@@ -55,7 +88,7 @@ const T = {
     help:
       "Puoi dire: voglio vedere seguito da un titolo, metti in pausa, riprendi, vai avanti di trenta secondi, " +
       "torna indietro di un minuto, vai al minuto venti, prossimo episodio, salta l'intro, chiudi il video, " +
-      "oppure cerca seguito da un titolo.",
+      "oppure cerca seguito da un titolo. Per muoverti: su, giù, sinistra, destra e ok.",
     ready: "Nuvio è pronto.",
     whatNext: "Cosa vuoi fare?",
     didntUnderstand: "Non ho capito.",
@@ -64,6 +97,7 @@ const T = {
     askMinuteReprompt: "Dimmi il minuto, per esempio vai al minuto venti.",
     askQuery: "Cosa vuoi cercare?",
     askQueryReprompt: "Dimmi il titolo da cercare.",
+    askDirection: "Su, giù, sinistra o destra?",
     askPlay: "Cosa vuoi guardare?",
     askPlayReprompt: "Dimmi il titolo, per esempio voglio vedere The Bear.",
     done: "Fatto.",
@@ -103,7 +137,8 @@ const T = {
   en: {
     help:
       "You can say: play followed by a title, pause, resume, skip forward thirty seconds, go back one minute, " +
-      "go to minute twenty, next episode, skip the intro, close the video, or search for followed by a title.",
+      "go to minute twenty, next episode, skip the intro, close the video, or search for followed by a title. " +
+      "To move around: up, down, left, right and select.",
     ready: "Nuvio is ready.",
     whatNext: "What would you like to do?",
     didntUnderstand: "Sorry, I didn't get that.",
@@ -112,6 +147,7 @@ const T = {
     askMinuteReprompt: "Tell me the minute, for example go to minute twenty.",
     askQuery: "What do you want to search for?",
     askQueryReprompt: "Tell me the title to search for.",
+    askDirection: "Up, down, left or right?",
     askPlay: "What do you want to watch?",
     askPlayReprompt: "Tell me the title, for example play The Bear.",
     done: "Done.",
@@ -243,6 +279,13 @@ export function mapRequest(request: {
       if (!query) return reply(say(t.askQuery, false, t.askQueryReprompt));
       return cmd({ cmd: "search", query });
     }
+    case "DirezioneIntent": {
+      const key = directionOf(slots.direzione);
+      if (!key) return reply(say(t.askDirection, false, t.askDirection));
+      return cmd({ cmd: "key", key, count: repeatCount(slots.volte) });
+    }
+    case "SelezionaIntent":
+      return cmd({ cmd: "key", key: "select", count: 1 });
     case "GuardaIntent": {
       const query = slots.titolo?.value?.trim();
       if (!query) return reply(say(t.askPlay, false, t.askPlayReprompt));
@@ -283,4 +326,16 @@ export function speakResult(command: TvCommand, result: TvReply, lang: Lang = "i
     default:
       return t.codes[result.code] ?? (result.ok ? t.done : t.failed);
   }
+}
+
+/**
+ * The Alexa response for a TV reply. Key presses that worked answer silently and keep the
+ * microphone open, so navigation is "giù … giù … destra … ok" without repeating the wake word
+ * and skill name; everything else speaks the result and ends the session.
+ */
+export function respond(command: TvCommand, result: TvReply, lang: Lang): AlexaResponse {
+  if (command.cmd === "key" && result.ok) {
+    return { version: "1.0", response: { shouldEndSession: false } };
+  }
+  return say(speakResult(command, result, lang));
 }

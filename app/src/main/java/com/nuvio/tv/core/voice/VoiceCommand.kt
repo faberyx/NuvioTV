@@ -10,6 +10,7 @@ import org.json.JSONObject
  *   {"id":"<uuid>","cmd":"seek_by","ms":-30000}
  *   {"id":"<uuid>","cmd":"search","query":"the bear"}
  *   {"id":"<uuid>","cmd":"play","query":"the bear"}
+ *   {"id":"<uuid>","cmd":"key","key":"down","count":3}
  *
  * Reply (TV -> relay): {"id":"<uuid>","ok":true,"code":"paused"}
  * ("play" replies also carry "title": the name of the title that was opened.)
@@ -23,6 +24,9 @@ sealed interface VoiceCommand {
     data object SkipIntro : VoiceCommand
     data object Stop : VoiceCommand
     data class Search(val query: String) : VoiceCommand
+
+    /** Remote-control key press(es): D-pad arrows or select (OK). */
+    data class Key(val key: RemoteKey, val count: Int = 1) : VoiceCommand
 
     /** Find a title by name and start it (series resume from watch progress). */
     data class Play(val query: String) : VoiceCommand
@@ -40,6 +44,8 @@ sealed interface VoiceCommand {
     ) : VoiceCommand
 
     companion object {
+        const val MAX_KEY_REPEAT = 10
+
         fun fromJson(json: JSONObject): VoiceCommand? = when (json.optString("cmd")) {
             "pause" -> Pause
             "resume" -> Resume
@@ -50,8 +56,24 @@ sealed interface VoiceCommand {
             "stop" -> Stop
             "search" -> json.optString("query").trim().takeIf { it.isNotEmpty() }?.let(::Search)
             "play" -> json.optString("query").trim().takeIf { it.isNotEmpty() }?.let(::Play)
+            "key" -> RemoteKey.fromWire(json.optString("key"))?.let { key ->
+                Key(key, json.optInt("count", 1).coerceIn(1, MAX_KEY_REPEAT))
+            }
             else -> null
         }
+    }
+}
+
+/** Keys a voice command can press, with their Android key codes. */
+enum class RemoteKey(val wire: String, val keyCode: Int) {
+    UP("up", android.view.KeyEvent.KEYCODE_DPAD_UP),
+    DOWN("down", android.view.KeyEvent.KEYCODE_DPAD_DOWN),
+    LEFT("left", android.view.KeyEvent.KEYCODE_DPAD_LEFT),
+    RIGHT("right", android.view.KeyEvent.KEYCODE_DPAD_RIGHT),
+    SELECT("select", android.view.KeyEvent.KEYCODE_DPAD_CENTER);
+
+    companion object {
+        fun fromWire(value: String): RemoteKey? = entries.firstOrNull { it.wire == value }
     }
 }
 

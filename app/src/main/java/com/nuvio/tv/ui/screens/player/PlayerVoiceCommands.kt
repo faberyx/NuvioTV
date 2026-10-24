@@ -77,6 +77,10 @@ internal fun PlayerViewModel.handleVoiceCommand(
             null
         }
 
+        // Key presses behave exactly like the remote, in the player too (left/right seek,
+        // up/down/select show the controls), so the app-level handler sends them.
+        is VoiceCommand.Key -> null
+
         // Search has no "go back to what I was watching" path, so ask the user to stop first.
         is VoiceCommand.Search -> VoiceResult.fail("stop_playback_first")
     }

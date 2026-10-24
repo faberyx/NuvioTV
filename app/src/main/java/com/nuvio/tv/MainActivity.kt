@@ -266,6 +266,8 @@ private data class MainUiPrefs(
     val alwaysBackdropWithLogo: Boolean = false
 )
 
+private const val VOICE_KEY_REPEAT_DELAY_MS = 150L
+
 @AndroidEntryPoint
 open class MainActivity : ComponentActivity() {
 
@@ -1011,6 +1013,17 @@ open class MainActivity : ComponentActivity() {
                                         com.nuvio.tv.core.voice.VoiceResult.ok("searching")
                                     }
                                 }
+                                // Remote-control keys: injected into this activity like real
+                                // D-pad presses, spaced out so focus (and lazy lists) can follow.
+                                is com.nuvio.tv.core.voice.VoiceCommand.Key -> {
+                                    lifecycleScope.launch {
+                                        repeat(command.count) { index ->
+                                            if (index > 0) delay(VOICE_KEY_REPEAT_DELAY_MS)
+                                            sendVoiceKey(command.key.keyCode)
+                                        }
+                                    }
+                                    com.nuvio.tv.core.voice.VoiceResult.ok("key_sent")
+                                }
                                 // Precheck for "play <title>": the coordinator resolves the
                                 // title only once a screen has agreed it can be opened.
                                 is com.nuvio.tv.core.voice.VoiceCommand.Play -> {
@@ -1362,6 +1375,13 @@ open class MainActivity : ComponentActivity() {
             }
             trackingProgressRefreshCoordinator.refreshConnected(refreshIntent)
         }
+    }
+
+    /** Delivers a down/up pair through the normal key path (focus, BackHandlers, idle wake-up). */
+    private fun sendVoiceKey(keyCode: Int) {
+        val now = android.os.SystemClock.uptimeMillis()
+        dispatchKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_DOWN, keyCode, 0))
+        dispatchKeyEvent(KeyEvent(now, android.os.SystemClock.uptimeMillis(), KeyEvent.ACTION_UP, keyCode, 0))
     }
 
     override fun onNewIntent(intent: Intent) {

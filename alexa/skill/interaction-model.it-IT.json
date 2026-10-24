@@ -210,9 +210,114 @@
           "samples": [
             "voglio vedere {titolo}"
           ]
+        },
+        {
+          "name": "DirezioneIntent",
+          "slots": [
+            {
+              "name": "direzione",
+              "type": "DIREZIONE"
+            },
+            {
+              "name": "volte",
+              "type": "AMAZON.NUMBER"
+            }
+          ],
+          "samples": [
+            "{direzione}",
+            "vai {direzione}",
+            "andare {direzione}",
+            "sposta {direzione}",
+            "spostare {direzione}",
+            "spostati {direzione}",
+            "spostarti {direzione}",
+            "premi {direzione}",
+            "premere {direzione}",
+            "freccia {direzione}",
+            "{direzione} {volte} volte",
+            "vai {direzione} {volte} volte",
+            "andare {direzione} {volte} volte",
+            "sposta {direzione} {volte} volte",
+            "spostare {direzione} {volte} volte",
+            "premi {direzione} {volte} volte",
+            "premere {direzione} {volte} volte",
+            "{direzione} di {volte}",
+            "vai {direzione} di {volte}",
+            "andare {direzione} di {volte}"
+          ]
+        },
+        {
+          "name": "SelezionaIntent",
+          "slots": [],
+          "samples": [
+            "ok",
+            "okay",
+            "seleziona",
+            "selezionare",
+            "conferma",
+            "confermare",
+            "clicca",
+            "cliccare",
+            "premi ok",
+            "premere ok",
+            "invio",
+            "premi invio",
+            "premere invio"
+          ]
         }
       ],
-      "types": []
+      "types": [
+        {
+          "name": "DIREZIONE",
+          "values": [
+            {
+              "id": "up",
+              "name": {
+                "value": "su",
+                "synonyms": [
+                  "sopra",
+                  "in alto",
+                  "alto",
+                  "in su"
+                ]
+              }
+            },
+            {
+              "id": "down",
+              "name": {
+                "value": "giù",
+                "synonyms": [
+                  "sotto",
+                  "in basso",
+                  "basso",
+                  "giu",
+                  "in giù"
+                ]
+              }
+            },
+            {
+              "id": "left",
+              "name": {
+                "value": "sinistra",
+                "synonyms": [
+                  "a sinistra",
+                  "verso sinistra"
+                ]
+              }
+            },
+            {
+              "id": "right",
+              "name": {
+                "value": "destra",
+                "synonyms": [
+                  "a destra",
+                  "verso destra"
+                ]
+              }
+            }
+          ]
+        }
+      ]
     }
   }
 }

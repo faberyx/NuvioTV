@@ -188,9 +188,93 @@
           "samples": [
             "play {titolo}"
           ]
+        },
+        {
+          "name": "DirezioneIntent",
+          "slots": [
+            {
+              "name": "direzione",
+              "type": "DIREZIONE"
+            },
+            {
+              "name": "volte",
+              "type": "AMAZON.NUMBER"
+            }
+          ],
+          "samples": [
+            "{direzione}",
+            "go {direzione}",
+            "move {direzione}",
+            "press {direzione}",
+            "{direzione} {volte} times",
+            "go {direzione} {volte} times",
+            "move {direzione} {volte} times",
+            "press {direzione} {volte} times",
+            "{direzione} {volte}",
+            "go {direzione} {volte}"
+          ]
+        },
+        {
+          "name": "SelezionaIntent",
+          "slots": [],
+          "samples": [
+            "select",
+            "ok",
+            "okay",
+            "click",
+            "press ok",
+            "press select",
+            "enter",
+            "press enter",
+            "confirm",
+            "click it",
+            "select it"
+          ]
         }
       ],
-      "types": []
+      "types": [
+        {
+          "name": "DIREZIONE",
+          "values": [
+            {
+              "id": "up",
+              "name": {
+                "value": "up",
+                "synonyms": [
+                  "upwards"
+                ]
+              }
+            },
+            {
+              "id": "down",
+              "name": {
+                "value": "down",
+                "synonyms": [
+                  "downwards"
+                ]
+              }
+            },
+            {
+              "id": "left",
+              "name": {
+                "value": "left",
+                "synonyms": [
+                  "to the left"
+                ]
+              }
+            },
+            {
+              "id": "right",
+              "name": {
+                "value": "right",
+                "synonyms": [
+                  "to the right"
+                ]
+              }
+            }
+          ]
+        }
+      ]
     }
   }
 }
