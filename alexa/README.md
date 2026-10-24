@@ -31,7 +31,7 @@ or with the app in the background.
 | mettere il prossimo episodio | next episode (series). With Stream auto-play on Manual this opens the next episode's source list, same as the remote button |
 | saltare l'intro / la sigla / il riassunto | skip the active intro or recap |
 | chiudere il video | exit the player |
-| voglio vedere *titolo* (say it after "Alexa, apri home tv"). Add a year or the type to pick between same-name titles: "voglio vedere dune del 2021", "voglio vedere il film dune", "voglio vedere la serie the office" | find the title and start it (stops the current video first): series resume where you left off; sources follow your Stream auto-play setting (Manual = you pick) |
+| voglio vedere *titolo* (say it after "Alexa, apri home tv"). Add a year or the type to pick between same-name titles: "voglio vedere dune del 2021", "voglio vedere il film dune", "voglio vedere la serie the office". Starts the first available source even if Stream auto-play is Manual | find the title and start it (stops the current video first): series resume where you left off; sources follow your Stream auto-play setting (Manual = you pick) |
 | cercare *titolo* | open Search with the query (only when no video is playing) |
 
 English, after "ask home tv to…": play *title* · pause · resume · skip forward 30 seconds · go back 2 minutes ·

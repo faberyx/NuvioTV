@@ -103,6 +103,7 @@ class StreamScreenViewModel @Inject constructor(
     private val torrentService: TorrentService,
     private val serverStreams: ServerStreams,
     private val serverPlayback: ServerPlayback,
+    voiceAutoPlayRequest: com.nuvio.tv.core.voice.VoiceAutoPlayRequest,
     party: com.nuvio.tv.core.party.PartyRepository,
     profileManager: com.nuvio.tv.core.profile.ProfileManager,
     savedStateHandle: SavedStateHandle
@@ -150,6 +151,9 @@ class StreamScreenViewModel @Inject constructor(
     private val manualSelection: Boolean = savedStateHandle.get<String>("manualSelection")
         ?.toBooleanStrictOrNull()
         ?: false
+    // Opened by "play <title>" over Alexa: start the first source even in Manual mode.
+    private val voiceStartedPlayback: Boolean =
+        !manualSelection && voiceAutoPlayRequest.consume(contentId, videoId)
     private val streamCacheKey: String = "${contentType.lowercase()}|$videoId"
     private val partyKey: String = com.nuvio.tv.core.party.partyMediaKey(
         metaType = contentType,
@@ -400,7 +404,13 @@ class StreamScreenViewModel @Inject constructor(
         streamLoadScope = newScope
         streamLoadJob = newScope.launch {
             streamLoadCompleted = false
-            val playerSettings = playerSettingsDataStore.playerSettings.first()
+            val playerSettings = playerSettingsDataStore.playerSettings.first().let { settings ->
+                if (voiceStartedPlayback) {
+                    com.nuvio.tv.core.voice.VoiceAutoPlayRequest.forVoice(settings)
+                } else {
+                    settings
+                }
+            }
             if (manualSelection) {
                 directAutoPlayModeInitializedForSession = true
                 directAutoPlayFlowEnabledForSession = false

@@ -10,14 +10,16 @@ import javax.inject.Singleton
  *  1. ask the screens whether a title may be opened right now (the app refuses before
  *     onboarding is done; the player answers "ready while playing" and keeps playing);
  *  2. resolve the spoken title against the addon catalogs;
- *  3. open it with play-on-load (series resume from watch progress, sources follow the user's
- *     stream auto-play setting). If a video is playing, the player exits first.
+ *  3. open it with play-on-load (series resume from watch progress). The sources screen then
+ *     starts the first available source, even if Stream auto-play is Manual
+ *     ([VoiceAutoPlayRequest]). If a video is playing, the player exits first.
  * No match: open the Search screen, or, if a video is playing, leave it playing.
  */
 @Singleton
 class VoicePlayCoordinator @Inject constructor(
     private val bus: VoiceCommandBus,
     private val resolver: VoiceTitleResolver,
+    private val autoPlayRequest: VoiceAutoPlayRequest,
 ) {
     suspend fun play(query: String): VoiceResult {
         val precheck = bus.dispatch(VoiceCommand.Play(query))
@@ -34,6 +36,8 @@ class VoicePlayCoordinator @Inject constructor(
             return if (search.ok) VoiceResult.fail("not_found_searching") else search
         }
 
+        // Before navigating: the sources screen is created later and checks for this.
+        autoPlayRequest.request(match.id)
         val opened = bus.dispatch(match)
         val spokenTitle = match.year?.let { "${match.name} ($it)" } ?: match.name
         return if (opened.ok) opened.copy(title = spokenTitle) else opened
