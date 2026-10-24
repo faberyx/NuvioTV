@@ -1,7 +1,7 @@
 {
   "interactionModel": {
     "languageModel": {
-      "invocationName": "home tv",
+      "invocationName": "mia t. v.",
       "intents": [
         {
           "name": "AMAZON.CancelIntent",
