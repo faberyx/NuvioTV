@@ -5,6 +5,12 @@ Control Nuvio on the TV from an Echo while the app is open:
 > "Alexa, chiedi a nuvio tv di mettere in pausa"
 > "Alexa, chiedi a nuvio tv di andare avanti di due minuti"
 > "Alexa, chiedi a nuvio tv di cercare the bear"
+> "Alexa, ask nuvio tv to skip forward two minutes"
+
+The skill ships Italian (it-IT) and English (en-US, en-GB) models, and Alexa answers in the
+language of the request. **The Echo's language setting decides which model is used**
+(Alexa app → Devices → your Echo → Language). An Echo set to Italian only matches the
+it-IT model, and one set to English (UK) only matches en-GB.
 
 ```
 Echo ─▶ Alexa cloud ─HTTPS─▶ relay Worker /alexa ─▶ Durable Object ─WebSocket─▶ Nuvio (TV)
@@ -27,7 +33,12 @@ or with the app in the background.
 | chiudere il video | exit the player |
 | cercare *titolo* | open Search with the query (only when no video is playing) |
 
-You can also say "Alexa, apri nuvio tv" and then give the command without the prefix.
+English, after "ask nuvio tv to…": pause · resume · skip forward 30 seconds · go back 2 minutes ·
+go to minute 20 · go to 1 hour and 5 minutes · play the next episode · skip the intro / recap ·
+close the video · search for *title*.
+
+You can also say "Alexa, apri nuvio tv" (or "Alexa, open nuvio tv") and then give the command
+without the prefix.
 
 ## 1. Deploy the relay (Cloudflare Workers, Free plan is enough)
 
@@ -42,9 +53,11 @@ npx wrangler deploy             # note the https://nuvio-alexa-relay.<sub>.worke
 
 ## 2. Create the skill (developer.amazon.com → Alexa Skills Kit)
 
-1. **Create Skill**: name "Nuvio TV", locale **Italian (IT)**, model **Custom**, hosting
-   **Provision your own**, template **Start from scratch**.
-2. **Interaction Model → JSON Editor**: paste `skill/interaction-model.it-IT.json`, then **Save** and **Build**.
+1. **Create Skill**: name "Nuvio TV", primary locale matching your Echo's language (e.g. **English (UK)**
+   or **Italian (IT)**), model **Custom**, hosting **Provision your own**, template **Start from scratch**.
+   You can add more languages afterwards from the language drop-down → *Language settings*.
+2. **Interaction Model → JSON Editor**: for each language, paste the matching file
+   (`skill/interaction-model.en-GB.json`, `…en-US.json` or `…it-IT.json`), then **Save** and **Build**.
 3. **Endpoint**: choose **HTTPS** and enter `https://nuvio-alexa-relay.<sub>.workers.dev/alexa`.
    For the SSL type pick *"My development endpoint is a sub-domain of a domain that has a wildcard
    certificate from a certificate authority"*.
@@ -90,7 +103,7 @@ Build and install as usual. With both values blank the feature stays off
 | `ui/screens/player/PlayerVoiceCommands.kt` | maps commands onto existing `PlayerEvent`s |
 | `PlayerScreen.kt`, `MainActivity.kt`, `SearchViewModel.kt` | handler registration, socket lifecycle, voice search |
 | `alexa/relay-worker/` | Worker and Durable Object relay |
-| `alexa/skill/` | it-IT interaction model |
+| `alexa/skill/` | interaction models (it-IT, en-US, en-GB) |
 
 To add a command: add it to `VoiceCommand` (Kotlin) and `TvCommand` (TS), handle it in
 `PlayerVoiceCommands.kt`, add an intent to the model and `mapRequest`, and add a reply in `speakResult`.

@@ -9,7 +9,7 @@
  */
 
 import { AlexaVerificationError, verifyAlexaRequest } from "./alexa-verify";
-import { mapRequest, say, speakResult, type TvCommand, type TvReply } from "./intents";
+import { langOf, mapRequest, say, speakResult, type TvCommand, type TvReply } from "./intents";
 
 export interface Env {
   RELAY: DurableObjectNamespace;
@@ -62,7 +62,7 @@ async function handleAlexa(request: Request, env: Env): Promise<Response> {
     body: JSON.stringify(outcome.command),
   });
   const reply = (await res.json()) as TvReply;
-  return Response.json(say(speakResult(outcome.command, reply)));
+  return Response.json(say(speakResult(outcome.command, reply, langOf(envelope.request?.locale))));
 }
 
 async function handleTv(request: Request, env: Env): Promise<Response> {

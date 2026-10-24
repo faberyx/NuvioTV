@@ -1,0 +1,184 @@
+{
+  "interactionModel": {
+    "languageModel": {
+      "invocationName": "nuvio tv",
+      "intents": [
+        {
+          "name": "AMAZON.CancelIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.HelpIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.StopIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.NavigateHomeIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.FallbackIntent",
+          "samples": []
+        },
+        {
+          "name": "PausaIntent",
+          "slots": [],
+          "samples": [
+            "pause",
+            "pause it",
+            "pause the video",
+            "pause the show",
+            "pause the movie",
+            "hold on",
+            "put it on pause"
+          ]
+        },
+        {
+          "name": "RiprendiIntent",
+          "slots": [],
+          "samples": [
+            "resume",
+            "resume the video",
+            "resume playback",
+            "play",
+            "continue",
+            "unpause",
+            "keep playing",
+            "carry on",
+            "start playing again"
+          ]
+        },
+        {
+          "name": "AvantiIntent",
+          "slots": [
+            {
+              "name": "durata",
+              "type": "AMAZON.DURATION"
+            }
+          ],
+          "samples": [
+            "skip forward",
+            "go forward",
+            "fast forward",
+            "skip ahead",
+            "skip forward {durata}",
+            "skip ahead {durata}",
+            "go forward {durata}",
+            "fast forward {durata}",
+            "jump ahead {durata}",
+            "forward {durata}",
+            "skip forward by {durata}",
+            "go forward by {durata}"
+          ]
+        },
+        {
+          "name": "IndietroIntent",
+          "slots": [
+            {
+              "name": "durata",
+              "type": "AMAZON.DURATION"
+            }
+          ],
+          "samples": [
+            "go back",
+            "rewind",
+            "skip back",
+            "go back {durata}",
+            "rewind {durata}",
+            "skip back {durata}",
+            "jump back {durata}",
+            "back {durata}",
+            "go back by {durata}",
+            "rewind by {durata}"
+          ]
+        },
+        {
+          "name": "VaiAlMinutoIntent",
+          "slots": [
+            {
+              "name": "minuti",
+              "type": "AMAZON.NUMBER"
+            },
+            {
+              "name": "ore",
+              "type": "AMAZON.NUMBER"
+            }
+          ],
+          "samples": [
+            "go to minute {minuti}",
+            "jump to minute {minuti}",
+            "skip to minute {minuti}",
+            "take me to minute {minuti}",
+            "start from minute {minuti}",
+            "go to {ore} hour {minuti} minutes",
+            "go to {ore} hours {minuti} minutes",
+            "go to {ore} hour and {minuti} minutes",
+            "go to {ore} hours and {minuti} minutes",
+            "jump to {ore} hour {minuti} minutes",
+            "jump to {ore} hours {minuti} minutes"
+          ]
+        },
+        {
+          "name": "ProssimoEpisodioIntent",
+          "slots": [],
+          "samples": [
+            "next episode",
+            "the next episode",
+            "play the next episode",
+            "play next episode",
+            "go to the next episode",
+            "skip to the next episode",
+            "next"
+          ]
+        },
+        {
+          "name": "SaltaIntroIntent",
+          "slots": [],
+          "samples": [
+            "skip intro",
+            "skip the intro",
+            "skip the opening",
+            "skip the recap",
+            "skip the credits",
+            "skip the opening credits",
+            "skip the theme song"
+          ]
+        },
+        {
+          "name": "ChiudiVideoIntent",
+          "slots": [],
+          "samples": [
+            "close the video",
+            "close the player",
+            "exit the video",
+            "exit the player",
+            "quit the video",
+            "end playback",
+            "stop the video"
+          ]
+        },
+        {
+          "name": "CercaIntent",
+          "slots": [
+            {
+              "name": "titolo",
+              "type": "AMAZON.SearchQuery"
+            }
+          ],
+          "samples": [
+            "search for {titolo}",
+            "search {titolo}",
+            "find {titolo}",
+            "look for {titolo}",
+            "look up {titolo}",
+            "show me {titolo}"
+          ]
+        }
+      ],
+      "types": []
+    }
+  }
+}
