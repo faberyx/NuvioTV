@@ -1,0 +1,3372 @@
+From e281ae5f83138537baca4a6eac9bde2155c1ec3a Mon Sep 17 00:00:00 2001
+From: Fabrizio Catitti <fabrizio.catitti@gmail.com>
+Date: Sat, 24 Oct 2026 11:24:44 +0200
+Subject: [PATCH 1/6] feat(voice): Alexa voice control while Nuvio is in the
+ foreground
+
+Adds a relay-based Alexa integration:
+- core/voice: VoiceCommandBus (priority-ordered handlers), VoiceCommandClient
+  (OkHttp WebSocket to the relay, opened in onStart / closed in onStop)
+- Player handles pause/resume/seek/seek-to/next episode/skip intro/close
+  via existing PlayerEvents; app-level handler handles voice search
+- alexa/relay-worker: Cloudflare Worker + Durable Object with Alexa request
+  signature verification and skill-ID pinning
+- alexa/skill: it-IT interaction model ("nuvio tv")
+
+Configure with VOICE_RELAY_URL / VOICE_RELAY_TOKEN in local.properties;
+disabled when blank.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JQ7oit84w6xrrRhN57hYZw
+---
+ alexa/README.md                               |  96 ++++++++
+ alexa/relay-worker/.gitignore                 |   3 +
+ alexa/relay-worker/package.json               |  15 ++
+ alexa/relay-worker/src/alexa-verify.ts        | 232 ++++++++++++++++++
+ alexa/relay-worker/src/index.ts               | 163 ++++++++++++
+ alexa/relay-worker/src/intents.ts             | 189 ++++++++++++++
+ alexa/relay-worker/tsconfig.json              |  13 +
+ alexa/relay-worker/wrangler.toml              |  21 ++
+ alexa/skill/interaction-model.it-IT.json      | 206 ++++++++++++++++
+ app/build.gradle.kts                          |   3 +
+ .../main/java/com/nuvio/tv/MainActivity.kt    |  32 +++
+ .../com/nuvio/tv/core/voice/VoiceCommand.kt   |  49 ++++
+ .../nuvio/tv/core/voice/VoiceCommandBus.kt    |  66 +++++
+ .../nuvio/tv/core/voice/VoiceCommandClient.kt | 133 ++++++++++
+ .../tv/ui/screens/player/PlayerScreen.kt      |   8 +
+ .../tv/ui/screens/player/PlayerViewModel.kt   |   1 +
+ .../ui/screens/player/PlayerVoiceCommands.kt  |  80 ++++++
+ .../tv/ui/screens/search/SearchViewModel.kt   |  10 +
+ local.example.properties                      |   4 +
+ 19 files changed, 1324 insertions(+)
+ create mode 100644 alexa/README.md
+ create mode 100644 alexa/relay-worker/.gitignore
+ create mode 100644 alexa/relay-worker/package.json
+ create mode 100644 alexa/relay-worker/src/alexa-verify.ts
+ create mode 100644 alexa/relay-worker/src/index.ts
+ create mode 100644 alexa/relay-worker/src/intents.ts
+ create mode 100644 alexa/relay-worker/tsconfig.json
+ create mode 100644 alexa/relay-worker/wrangler.toml
+ create mode 100644 alexa/skill/interaction-model.it-IT.json
+ create mode 100644 app/src/main/java/com/nuvio/tv/core/voice/VoiceCommand.kt
+ create mode 100644 app/src/main/java/com/nuvio/tv/core/voice/VoiceCommandBus.kt
+ create mode 100644 app/src/main/java/com/nuvio/tv/core/voice/VoiceCommandClient.kt
+ create mode 100644 app/src/main/java/com/nuvio/tv/ui/screens/player/PlayerVoiceCommands.kt
+
+diff --git a/alexa/README.md b/alexa/README.md
+new file mode 100644
+index 0000000..6844a40
+--- /dev/null
++++ b/alexa/README.md
+@@ -0,0 +1,96 @@
++# Alexa voice control
++
++Control Nuvio on the TV from an Echo while the app is open:
++
++> "Alexa, chiedi a nuvio tv di mettere in pausa"
++> "Alexa, chiedi a nuvio tv di andare avanti di due minuti"
++> "Alexa, chiedi a nuvio tv di cercare the bear"
++
++```
++Echo ─▶ Alexa cloud ─HTTPS─▶ relay Worker /alexa ─▶ Durable Object ─WebSocket─▶ Nuvio (TV)
++                                          ◀── spoken reply ◀── result code ◀──
++```
++
++The TV opens the WebSocket in `MainActivity.onStart` and closes it in `onStop`. That means
++voice control works only while Nuvio is on screen. It does not work with an external player
++or with the app in the background.
++
++## Commands
++
++| Say (after "chiedi a nuvio tv di…") | Does |
++|---|---|
++| mettere in pausa / riprendere | pause / resume |
++| andare avanti di 30 secondi · tornare indietro di 2 minuti | seek by (defaults are +30 s and −10 s) |
++| andare al minuto 20 · andare a 1 ora e 5 minuti | seek to |
++| mettere il prossimo episodio | next episode (series) |
++| saltare l'intro / la sigla / il riassunto | skip the active intro or recap |
++| chiudere il video | exit the player |
++| cercare *titolo* | open Search with the query (only when no video is playing) |
++
++You can also say "Alexa, apri nuvio tv" and then give the command without the prefix.
++
++## 1. Deploy the relay (Cloudflare Workers, Free plan is enough)
++
++```bash
++cd alexa/relay-worker
++npm install
++npx wrangler login
++openssl rand -hex 32            # this is your TV token
++npx wrangler secret put TV_TOKEN
++npx wrangler deploy             # note the https://nuvio-alexa-relay.<sub>.workers.dev URL
++```
++
++## 2. Create the skill (developer.amazon.com → Alexa Skills Kit)
++
++1. **Create Skill**: name "Nuvio TV", locale **Italian (IT)**, model **Custom**, hosting
++   **Provision your own**, template **Start from scratch**.
++2. **Interaction Model → JSON Editor**: paste `skill/interaction-model.it-IT.json`, then **Save** and **Build**.
++3. **Endpoint**: choose **HTTPS** and enter `https://nuvio-alexa-relay.<sub>.workers.dev/alexa`.
++   For the SSL type pick *"My development endpoint is a sub-domain of a domain that has a wildcard
++   certificate from a certificate authority"*.
++4. Copy the **Skill ID** (`amzn1.ask.skill.…`) into `ALEXA_SKILL_ID` in `wrangler.toml` and run `npx wrangler deploy` again.
++5. **Test** tab: set it to **Development**. Skills in development work on every Echo
++   registered to the same Amazon account. No certification is needed.
++
++## 3. Build the app
++
++Add to `local.properties`:
++
++```properties
++VOICE_RELAY_URL=https://nuvio-alexa-relay.<sub>.workers.dev
++VOICE_RELAY_TOKEN=<the TV token from step 1>
++```
++
++Build and install as usual. With both values blank the feature stays off
++(`VoiceCommandClient.isConfigured`) and no socket is opened.
++
++## Checking it works
++
++- `npx wrangler tail`: shows Alexa requests and any rejected signatures.
++- `adb logcat -s VoiceCommandClient`: shows "connected to voice relay" and each command/result.
++- If Alexa says "Nuvio non è aperto sulla TV", the TV socket isn't connected. Check the URL and token.
++
++## Security
++
++- Every Alexa request is verified: the cert-chain URL rules, a valid leaf with SAN
++  `echo-api.amazon.com`, the chain signatures, `Signature-256` over the body, and a
++  timestamp within 150 s. The skill ID must also match. See `src/alexa-verify.ts`.
++- The TV authenticates with a bearer token (compared in constant time). There is a single TV
++  per deployment, and a new connection replaces the old one.
++- The token is compiled into your APK, so treat the APK as private. To rotate it, run
++  `wrangler secret put TV_TOKEN` and rebuild the app.
++
++## Code map
++
++| File | Role |
++|---|---|
++| `core/voice/VoiceCommand.kt` | wire format, commands and result codes |
++| `core/voice/VoiceCommandBus.kt` | routes commands to the screen that owns them (player > app) |
++| `core/voice/VoiceCommandClient.kt` | OkHttp WebSocket with reconnect and backoff |
++| `ui/screens/player/PlayerVoiceCommands.kt` | maps commands onto existing `PlayerEvent`s |
++| `PlayerScreen.kt`, `MainActivity.kt`, `SearchViewModel.kt` | handler registration, socket lifecycle, voice search |
++| `alexa/relay-worker/` | Worker and Durable Object relay |
++| `alexa/skill/` | it-IT interaction model |
++
++To add a command: add it to `VoiceCommand` (Kotlin) and `TvCommand` (TS), handle it in
++`PlayerVoiceCommands.kt`, add an intent to the model and `mapRequest`, and add a reply in `speakResult`.
+diff --git a/alexa/relay-worker/.gitignore b/alexa/relay-worker/.gitignore
+new file mode 100644
+index 0000000..a933f10
+--- /dev/null
++++ b/alexa/relay-worker/.gitignore
+@@ -0,0 +1,3 @@
++node_modules/
++.wrangler/
++.dev.vars
+diff --git a/alexa/relay-worker/package.json b/alexa/relay-worker/package.json
+new file mode 100644
+index 0000000..86da113
+--- /dev/null
++++ b/alexa/relay-worker/package.json
+@@ -0,0 +1,15 @@
++{
++  "name": "nuvio-alexa-relay",
++  "private": true,
++  "type": "module",
++  "scripts": {
++    "dev": "wrangler dev",
++    "deploy": "wrangler deploy",
++    "typecheck": "tsc --noEmit"
++  },
++  "devDependencies": {
++    "@cloudflare/workers-types": "^4.20251001.0",
++    "typescript": "^5.9.0",
++    "wrangler": "^4.40.0"
++  }
++}
+diff --git a/alexa/relay-worker/src/alexa-verify.ts b/alexa/relay-worker/src/alexa-verify.ts
+new file mode 100644
+index 0000000..5b6b6df
+--- /dev/null
++++ b/alexa/relay-worker/src/alexa-verify.ts
+@@ -0,0 +1,232 @@
++/**
++ * Alexa request verification for a self-hosted (non-Lambda) skill endpoint.
++ * https://developer.amazon.com/docs/custom-skills/host-a-custom-skill-as-a-web-service.html
++ *
++ * Checks, in order:
++ *  1. SignatureCertChainUrl points at Amazon's echo.api bucket (https, s3.amazonaws.com:443, /echo.api/).
++ *  2. The leaf certificate is currently valid and its SAN contains echo-api.amazon.com.
++ *  3. The leaf is signed by the next certificate in the chain (each link is checked).
++ *  4. Signature-256 (SHA256withRSA over the raw body) verifies with the leaf's public key.
++ *  5. The request timestamp is within 150 seconds.
++ *
++ * The chain is fetched over TLS from an Amazon-owned bucket, which is what anchors trust;
++ * the in-chain signature checks are defence in depth. Uses only WebCrypto, no dependencies.
++ */
++
++const SAN_OID = "2.5.29.17";
++const REQUIRED_SAN = "echo-api.amazon.com";
++const MAX_SKEW_MS = 150_000;
++const CERT_CACHE_MS = 60 * 60 * 1000;
++
++const RSA_ALGS: Record<string, string> = {
++  "1.2.840.113549.1.1.11": "SHA-256",
++  "1.2.840.113549.1.1.12": "SHA-384",
++  "1.2.840.113549.1.1.13": "SHA-512",
++};
++
++export class AlexaVerificationError extends Error {}
++
++// ---------------------------------------------------------------- minimal DER reader
++
++interface Tlv {
++  tag: number;
++  start: number; // offset of the tag byte
++  valueStart: number;
++  end: number; // exclusive
++}
++
++function readTlv(buf: Uint8Array, offset: number): Tlv {
++  const tag = buf[offset];
++  let len = buf[offset + 1];
++  let p = offset + 2;
++  if (len & 0x80) {
++    const n = len & 0x7f;
++    if (n === 0 || n > 4) throw new AlexaVerificationError("unsupported DER length");
++    len = 0;
++    for (let i = 0; i < n; i++) len = (len << 8) | buf[p++];
++  }
++  const end = p + len;
++  if (end > buf.length) throw new AlexaVerificationError("truncated DER");
++  return { tag, start: offset, valueStart: p, end };
++}
++
++function children(buf: Uint8Array, parent: Tlv): Tlv[] {
++  const out: Tlv[] = [];
++  let p = parent.valueStart;
++  while (p < parent.end) {
++    const t = readTlv(buf, p);
++    out.push(t);
++    p = t.end;
++  }
++  return out;
++}
++
++function decodeOid(bytes: Uint8Array): string {
++  const parts: number[] = [Math.floor(bytes[0] / 40), bytes[0] % 40];
++  let v = 0;
++  for (let i = 1; i < bytes.length; i++) {
++    v = (v << 7) | (bytes[i] & 0x7f);
++    if (!(bytes[i] & 0x80)) {
++      parts.push(v);
++      v = 0;
++    }
++  }
++  return parts.join(".");
++}
++
++function decodeTime(buf: Uint8Array, t: Tlv): number {
++  const s = new TextDecoder().decode(buf.subarray(t.valueStart, t.end));
++  let y: number, rest: string;
++  if (t.tag === 0x17) {
++    // UTCTime YYMMDDHHMMSSZ
++    const yy = parseInt(s.slice(0, 2), 10);
++    y = yy >= 50 ? 1900 + yy : 2000 + yy;
++    rest = s.slice(2);
++  } else if (t.tag === 0x18) {
++    // GeneralizedTime YYYYMMDDHHMMSSZ
++    y = parseInt(s.slice(0, 4), 10);
++    rest = s.slice(4);
++  } else {
++    throw new AlexaVerificationError("bad certificate time");
++  }
++  const n = (i: number) => parseInt(rest.slice(i, i + 2), 10);
++  return Date.UTC(y, n(0) - 1, n(2), n(4), n(6), n(8));
++}
++
++export interface ParsedCert {
++  tbs: Uint8Array<ArrayBuffer>;
++  sigAlgOid: string;
++  signature: Uint8Array<ArrayBuffer>;
++  spki: Uint8Array<ArrayBuffer>;
++  notBefore: number;
++  notAfter: number;
++  dnsNames: string[];
++}
++
++export function parseCertificate(der: Uint8Array): ParsedCert {
++  const cert = readTlv(der, 0);
++  const [tbsTlv, algTlv, sigTlv] = children(der, cert);
++  const tbsFields = children(der, tbsTlv);
++  let i = 0;
++  if (tbsFields[0].tag === 0xa0) i++; // [0] version
++  i++; // serialNumber
++  i++; // signature AlgorithmIdentifier
++  i++; // issuer
++  const validity = children(der, tbsFields[i++]);
++  i++; // subject
++  const spkiTlv = tbsFields[i++];
++
++  const dnsNames: string[] = [];
++  for (; i < tbsFields.length; i++) {
++    if (tbsFields[i].tag !== 0xa3) continue; // [3] extensions
++    const extSeq = children(der, tbsFields[i])[0];
++    for (const ext of children(der, extSeq)) {
++      const parts = children(der, ext);
++      const oid = decodeOid(der.subarray(parts[0].valueStart, parts[0].end));
++      if (oid !== SAN_OID) continue;
++      const octet = parts[parts.length - 1]; // OCTET STRING (critical flag is optional)
++      const names = readTlv(der, octet.valueStart);
++      for (const gn of children(der, names)) {
++        if (gn.tag === 0x82) dnsNames.push(new TextDecoder().decode(der.subarray(gn.valueStart, gn.end)));
++      }
++    }
++  }
++
++  const algOidTlv = children(der, algTlv)[0];
++  return {
++    tbs: der.slice(tbsTlv.start, tbsTlv.end),
++    sigAlgOid: decodeOid(der.subarray(algOidTlv.valueStart, algOidTlv.end)),
++    signature: der.slice(sigTlv.valueStart + 1, sigTlv.end), // skip BIT STRING unused-bits byte
++    spki: der.slice(spkiTlv.start, spkiTlv.end),
++    notBefore: decodeTime(der, validity[0]),
++    notAfter: decodeTime(der, validity[1]),
++    dnsNames,
++  };
++}
++
++export function pemToDerChain(pem: string): Uint8Array[] {
++  const blocks = pem.match(/-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/g) ?? [];
++  return blocks.map((b) => {
++    const b64 = b.replace(/-----(BEGIN|END) CERTIFICATE-----/g, "").replace(/\s+/g, "");
++    return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
++  });
++}
++
++// ---------------------------------------------------------------- verification
++
++export function validateCertChainUrl(raw: string | null): URL {
++  if (!raw) throw new AlexaVerificationError("missing SignatureCertChainUrl");
++  let url: URL;
++  try {
++    url = new URL(raw);
++  } catch {
++    throw new AlexaVerificationError("invalid SignatureCertChainUrl");
++  }
++  // new URL() normalises "/echo.api/../" segments and lower-cases the host.
++  if (url.protocol !== "https:") throw new AlexaVerificationError("cert URL must be https");
++  if (url.hostname !== "s3.amazonaws.com") throw new AlexaVerificationError("cert URL host");
++  if (url.port !== "" && url.port !== "443") throw new AlexaVerificationError("cert URL port");
++  if (!url.pathname.startsWith("/echo.api/")) throw new AlexaVerificationError("cert URL path");
++  return url;
++}
++
++async function importRsaKey(spki: Uint8Array<ArrayBuffer>, hash: string): Promise<CryptoKey> {
++  return crypto.subtle.importKey("spki", spki, { name: "RSASSA-PKCS1-v1_5", hash }, false, ["verify"]);
++}
++
++export async function verifyChain(chain: ParsedCert[], now: number): Promise<ParsedCert> {
++  if (chain.length === 0) throw new AlexaVerificationError("empty certificate chain");
++  const leaf = chain[0];
++  if (now < leaf.notBefore || now > leaf.notAfter) throw new AlexaVerificationError("certificate expired");
++  if (!leaf.dnsNames.includes(REQUIRED_SAN)) throw new AlexaVerificationError("certificate SAN mismatch");
++  for (let i = 0; i < chain.length - 1; i++) {
++    const hash = RSA_ALGS[chain[i].sigAlgOid];
++    if (!hash) throw new AlexaVerificationError(`unsupported chain signature ${chain[i].sigAlgOid}`);
++    const issuerKey = await importRsaKey(chain[i + 1].spki, hash);
++    const ok = await crypto.subtle.verify("RSASSA-PKCS1-v1_5", issuerKey, chain[i].signature, chain[i].tbs);
++    if (!ok) throw new AlexaVerificationError(`certificate chain broken at ${i}`);
++  }
++  return leaf;
++}
++
++const certCache = new Map<string, { leaf: ParsedCert; fetchedAt: number }>();
++
++async function loadLeaf(url: URL, now: number, fetcher: typeof fetch): Promise<ParsedCert> {
++  const key = url.toString();
++  const cached = certCache.get(key);
++  if (cached && now - cached.fetchedAt < CERT_CACHE_MS && now <= cached.leaf.notAfter) return cached.leaf;
++  const res = await fetcher(key);
++  if (!res.ok) throw new AlexaVerificationError(`cert fetch failed ${res.status}`);
++  const chain = pemToDerChain(await res.text()).map(parseCertificate);
++  const leaf = await verifyChain(chain, now);
++  certCache.set(key, { leaf, fetchedAt: now });
++  return leaf;
++}
++
++/** Throws AlexaVerificationError unless the request is a genuine, fresh Alexa request. */
++export async function verifyAlexaRequest(
++  headers: Headers,
++  rawBody: string,
++  opts: { now?: number; fetcher?: typeof fetch } = {},
++): Promise<void> {
++  const now = opts.now ?? Date.now();
++  const url = validateCertChainUrl(headers.get("SignatureCertChainUrl"));
++  const sigB64 = headers.get("Signature-256");
++  if (!sigB64) throw new AlexaVerificationError("missing Signature-256");
++
++  const leaf = await loadLeaf(url, now, opts.fetcher ?? fetch);
++  const key = await importRsaKey(leaf.spki, "SHA-256");
++  const signature = Uint8Array.from(atob(sigB64), (c) => c.charCodeAt(0));
++  const ok = await crypto.subtle.verify("RSASSA-PKCS1-v1_5", key, signature, new TextEncoder().encode(rawBody));
++  if (!ok) throw new AlexaVerificationError("bad request signature");
++
++  let timestamp: number;
++  try {
++    timestamp = Date.parse(JSON.parse(rawBody)?.request?.timestamp);
++  } catch {
++    throw new AlexaVerificationError("unparseable body");
++  }
++  if (!Number.isFinite(timestamp) || Math.abs(now - timestamp) > MAX_SKEW_MS) {
++    throw new AlexaVerificationError("stale request");
++  }
++}
+diff --git a/alexa/relay-worker/src/index.ts b/alexa/relay-worker/src/index.ts
+new file mode 100644
+index 0000000..aa94996
+--- /dev/null
++++ b/alexa/relay-worker/src/index.ts
+@@ -0,0 +1,163 @@
++/**
++ * Nuvio Alexa relay.
++ *
++ *   Echo ──HTTPS──▶ POST /alexa ──▶ TvRelay (Durable Object) ──WebSocket──▶ Nuvio on the TV
++ *                                        ◀── {"id","ok","code"} ◀──
++ *
++ * The TV keeps a WebSocket open to GET /tv while Nuvio is in the foreground, authenticated
++ * with TV_TOKEN. Alexa requests are signature-verified and pinned to ALEXA_SKILL_ID.
++ */
++
++import { AlexaVerificationError, verifyAlexaRequest } from "./alexa-verify";
++import { mapRequest, say, speakResult, type TvCommand, type TvReply } from "./intents";
++
++export interface Env {
++  RELAY: DurableObjectNamespace;
++  ALEXA_SKILL_ID: string;
++  TV_TOKEN: string;
++}
++
++const TV_REPLY_TIMEOUT_MS = 4_000;
++
++async function constantTimeEquals(a: string, b: string): Promise<boolean> {
++  const enc = new TextEncoder();
++  const [ha, hb] = await Promise.all([
++    crypto.subtle.digest("SHA-256", enc.encode(a)),
++    crypto.subtle.digest("SHA-256", enc.encode(b)),
++  ]);
++  const x = new Uint8Array(ha);
++  const y = new Uint8Array(hb);
++  let diff = 0;
++  for (let i = 0; i < x.length; i++) diff |= x[i] ^ y[i];
++  return diff === 0;
++}
++
++function relay(env: Env): DurableObjectStub {
++  // One TV per deployment, so a single fixed-name instance.
++  return env.RELAY.get(env.RELAY.idFromName("tv"));
++}
++
++async function handleAlexa(request: Request, env: Env): Promise<Response> {
++  const body = await request.text();
++  try {
++    await verifyAlexaRequest(request.headers, body);
++  } catch (e) {
++    const reason = e instanceof AlexaVerificationError ? e.message : "verification error";
++    console.warn("rejected alexa request:", reason);
++    return new Response("bad request", { status: 400 });
++  }
++
++  const envelope = JSON.parse(body);
++  const appId: string | undefined =
++    envelope?.context?.System?.application?.applicationId ?? envelope?.session?.application?.applicationId;
++  if (!env.ALEXA_SKILL_ID || appId !== env.ALEXA_SKILL_ID) {
++    return new Response("forbidden", { status: 403 });
++  }
++
++  const outcome = mapRequest(envelope.request ?? { type: "" });
++  if (outcome.kind === "reply") return Response.json(outcome.response);
++
++  const res = await relay(env).fetch("https://relay/command", {
++    method: "POST",
++    body: JSON.stringify(outcome.command),
++  });
++  const reply = (await res.json()) as TvReply;
++  return Response.json(say(speakResult(outcome.command, reply)));
++}
++
++async function handleTv(request: Request, env: Env): Promise<Response> {
++  if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
++    return new Response("expected websocket", { status: 426 });
++  }
++  const auth = request.headers.get("Authorization") ?? "";
++  if (!env.TV_TOKEN || !(await constantTimeEquals(auth, `Bearer ${env.TV_TOKEN}`))) {
++    return new Response("unauthorized", { status: 401 });
++  }
++  return relay(env).fetch("https://relay/tv", request);
++}
++
++export default {
++  async fetch(request: Request, env: Env): Promise<Response> {
++    const { pathname } = new URL(request.url);
++    if (pathname === "/alexa" && request.method === "POST") return handleAlexa(request, env);
++    if (pathname === "/tv" && request.method === "GET") return handleTv(request, env);
++    if (pathname === "/health") return new Response("ok");
++    return new Response("not found", { status: 404 });
++  },
++} satisfies ExportedHandler<Env>;
++
++/**
++ * Holds the TV's WebSocket (hibernation API, so an idle connection costs nothing) and
++ * correlates each command with the TV's reply.
++ */
++export class TvRelay implements DurableObject {
++  private pending = new Map<string, (reply: TvReply) => void>();
++
++  constructor(private readonly state: DurableObjectState, _env: Env) {}
++
++  async fetch(request: Request): Promise<Response> {
++    const { pathname } = new URL(request.url);
++
++    if (pathname === "/tv") {
++      // Only one TV: a new connection replaces any previous one.
++      for (const old of this.state.getWebSockets()) {
++        try {
++          old.close(4000, "replaced by a newer connection");
++        } catch {
++          /* already closed */
++        }
++      }
++      const pair = new WebSocketPair();
++      const [client, server] = Object.values(pair);
++      this.state.acceptWebSocket(server);
++      return new Response(null, { status: 101, webSocket: client });
++    }
++
++    if (pathname === "/command") {
++      const command = (await request.json()) as TvCommand;
++      const sockets = this.state.getWebSockets();
++      const socket = sockets[sockets.length - 1];
++      if (!socket) return Response.json({ ok: false, code: "tv_offline" } satisfies TvReply);
++
++      const id = crypto.randomUUID();
++      const reply = new Promise<TvReply>((resolve) => {
++        this.pending.set(id, resolve);
++        setTimeout(() => {
++          if (this.pending.delete(id)) resolve({ ok: false, code: "timeout" });
++        }, TV_REPLY_TIMEOUT_MS);
++      });
++      try {
++        socket.send(JSON.stringify({ id, ...command }));
++      } catch {
++        this.pending.delete(id);
++        return Response.json({ ok: false, code: "tv_offline" } satisfies TvReply);
++      }
++      return Response.json(await reply);
++    }
++
++    return new Response("not found", { status: 404 });
++  }
++
++  async webSocketMessage(_ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
++    if (typeof message !== "string") return;
++    let parsed: { id?: unknown; ok?: unknown; code?: unknown };
++    try {
++      parsed = JSON.parse(message);
++    } catch {
++      return;
++    }
++    if (typeof parsed.id !== "string") return;
++    const resolve = this.pending.get(parsed.id);
++    if (!resolve) return;
++    this.pending.delete(parsed.id);
++    resolve({ ok: parsed.ok === true, code: String(parsed.code ?? "") });
++  }
++
++  async webSocketClose(ws: WebSocket, code: number, reason: string): Promise<void> {
++    try {
++      ws.close(code, reason);
++    } catch {
++      /* already closed */
++    }
++  }
++}
+diff --git a/alexa/relay-worker/src/intents.ts b/alexa/relay-worker/src/intents.ts
+new file mode 100644
+index 0000000..f2d9ee9
+--- /dev/null
++++ b/alexa/relay-worker/src/intents.ts
+@@ -0,0 +1,189 @@
++/**
++ * Alexa (it-IT) intent -> TV command mapping, and TV result code -> spoken reply.
++ * Pure functions so they can be unit-tested outside the Workers runtime.
++ */
++
++export type TvCommand =
++  | { cmd: "pause" }
++  | { cmd: "resume" }
++  | { cmd: "seek_by"; ms: number }
++  | { cmd: "seek_to"; ms: number }
++  | { cmd: "next_episode" }
++  | { cmd: "skip_intro" }
++  | { cmd: "stop" }
++  | { cmd: "search"; query: string };
++
++export interface TvReply {
++  ok: boolean;
++  code: string;
++}
++
++export interface AlexaResponse {
++  version: "1.0";
++  response: {
++    outputSpeech?: { type: "PlainText"; text: string };
++    reprompt?: { outputSpeech: { type: "PlainText"; text: string } };
++    shouldEndSession: boolean;
++  };
++}
++
++type Slots = Record<string, { value?: string } | undefined>;
++
++const DEFAULT_SEEK_FORWARD_MS = 30_000;
++const DEFAULT_SEEK_BACK_MS = 10_000;
++
++const HELP =
++  "Puoi dire: metti in pausa, riprendi, vai avanti di trenta secondi, torna indietro di un minuto, " +
++  "vai al minuto venti, prossimo episodio, salta l'intro, chiudi il video, oppure cerca seguito da un titolo.";
++
++/** ISO-8601 duration from AMAZON.DURATION (e.g. PT30S, PT1H5M, PT1M30S) -> milliseconds. */
++export function parseIsoDuration(value: string | undefined): number | null {
++  if (!value) return null;
++  const m = /^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?)?$/.exec(value.trim());
++  if (!m || value.trim() === "P" || value.trim() === "PT") return null;
++  const [, d, h, min, s] = m;
++  const ms =
++    (Number(d ?? 0) * 86_400 + Number(h ?? 0) * 3_600 + Number(min ?? 0) * 60 + Number(s ?? 0)) * 1000;
++  return ms > 0 ? Math.round(ms) : null;
++}
++
++function plural(n: number, one: string, many: string): string {
++  return `${n} ${n === 1 ? one : many}`;
++}
++
++/** 90000 -> "1 minuto e 30 secondi" */
++export function speakDuration(ms: number): string {
++  const total = Math.round(Math.abs(ms) / 1000);
++  const h = Math.floor(total / 3600);
++  const m = Math.floor((total % 3600) / 60);
++  const s = total % 60;
++  const parts: string[] = [];
++  if (h) parts.push(plural(h, "ora", "ore"));
++  if (m) parts.push(plural(m, "minuto", "minuti"));
++  if (s || parts.length === 0) parts.push(plural(s, "secondo", "secondi"));
++  return parts.length > 1 ? `${parts.slice(0, -1).join(", ")} e ${parts[parts.length - 1]}` : parts[0];
++}
++
++export type IntentOutcome =
++  | { kind: "command"; command: TvCommand }
++  | { kind: "reply"; response: AlexaResponse };
++
++export function say(text: string, endSession = true, reprompt?: string): AlexaResponse {
++  return {
++    version: "1.0",
++    response: {
++      outputSpeech: { type: "PlainText", text },
++      ...(reprompt ? { reprompt: { outputSpeech: { type: "PlainText", text: reprompt } } } : {}),
++      shouldEndSession: endSession,
++    },
++  };
++}
++
++export function silent(): AlexaResponse {
++  return { version: "1.0", response: { shouldEndSession: true } };
++}
++
++/** Decides what to do with an Alexa request envelope's `request` object. */
++export function mapRequest(request: { type: string; intent?: { name: string; slots?: Slots } }): IntentOutcome {
++  if (request.type === "LaunchRequest") {
++    return { kind: "reply", response: say(`Nuvio è pronto. ${HELP}`, false, "Cosa vuoi fare?") };
++  }
++  if (request.type === "SessionEndedRequest") return { kind: "reply", response: silent() };
++  if (request.type !== "IntentRequest" || !request.intent) {
++    return { kind: "reply", response: say("Non ho capito.") };
++  }
++
++  const slots = request.intent.slots ?? {};
++  const cmd = (command: TvCommand): IntentOutcome => ({ kind: "command", command });
++
++  switch (request.intent.name) {
++    case "PausaIntent":
++      return cmd({ cmd: "pause" });
++    case "RiprendiIntent":
++      return cmd({ cmd: "resume" });
++    case "AvantiIntent":
++      return cmd({ cmd: "seek_by", ms: parseIsoDuration(slots.durata?.value) ?? DEFAULT_SEEK_FORWARD_MS });
++    case "IndietroIntent":
++      return cmd({ cmd: "seek_by", ms: -(parseIsoDuration(slots.durata?.value) ?? DEFAULT_SEEK_BACK_MS) });
++    case "VaiAlMinutoIntent": {
++      const minuti = Number(slots.minuti?.value);
++      const ore = Number(slots.ore?.value ?? 0);
++      if (!Number.isFinite(minuti) || minuti < 0 || !Number.isFinite(ore) || ore < 0) {
++        return { kind: "reply", response: say("A che minuto vuoi andare?", false, "Dimmi il minuto, per esempio vai al minuto venti.") };
++      }
++      return cmd({ cmd: "seek_to", ms: (ore * 3600 + minuti * 60) * 1000 });
++    }
++    case "ProssimoEpisodioIntent":
++      return cmd({ cmd: "next_episode" });
++    case "SaltaIntroIntent":
++      return cmd({ cmd: "skip_intro" });
++    case "ChiudiVideoIntent":
++      return cmd({ cmd: "stop" });
++    case "CercaIntent": {
++      const query = slots.titolo?.value?.trim();
++      if (!query) return { kind: "reply", response: say("Cosa vuoi cercare?", false, "Dimmi il titolo da cercare.") };
++      return cmd({ cmd: "search", query });
++    }
++    case "AMAZON.HelpIntent":
++      return { kind: "reply", response: say(HELP, false, "Cosa vuoi fare?") };
++    case "AMAZON.StopIntent":
++    case "AMAZON.CancelIntent":
++    case "AMAZON.NavigateHomeIntent":
++      return { kind: "reply", response: say("Ok.") };
++    case "AMAZON.FallbackIntent":
++    default:
++      return { kind: "reply", response: say(`Non ho capito. ${HELP}`, false, "Cosa vuoi fare?") };
++  }
++}
++
++/** TV result code -> spoken Italian reply. */
++export function speakResult(command: TvCommand, reply: TvReply): string {
++  switch (reply.code) {
++    case "paused":
++      return "In pausa.";
++    case "already_paused":
++      return "È già in pausa.";
++    case "buffering":
++      return "Sta ancora caricando, riprova tra un attimo.";
++    case "resumed":
++      return "Riprendo.";
++    case "already_playing":
++      return "Sta già andando.";
++    case "seeked_forward":
++      return command.cmd === "seek_by" ? `Avanti di ${speakDuration(command.ms)}.` : "Fatto.";
++    case "seeked_back":
++      return command.cmd === "seek_by" ? `Indietro di ${speakDuration(command.ms)}.` : "Fatto.";
++    case "seeked_to":
++      if (command.cmd !== "seek_to") return "Fatto.";
++      if (command.ms < 3_600_000 && command.ms % 60_000 === 0) return `Vado al minuto ${command.ms / 60_000}.`;
++      return `Vado a ${speakDuration(command.ms)}.`;
++    case "beyond_end":
++      return "Il video è più corto di così.";
++    case "live":
++      return "In una diretta non posso spostarmi.";
++    case "next_episode":
++      return "Metto il prossimo episodio.";
++    case "no_next_episode":
++      return "Non c'è un episodio successivo.";
++    case "skipped_intro":
++      return "Saltata.";
++    case "no_intro":
++      return "Adesso non c'è niente da saltare.";
++    case "stopped":
++      return "Video chiuso.";
++    case "searching":
++      return command.cmd === "search" ? `Cerco ${command.query}.` : "Cerco.";
++    case "stop_playback_first":
++      return "Prima chiudi il video, poi chiedimi di cercare.";
++    case "nothing_playing":
++      return "Non c'è niente in riproduzione.";
++    case "not_ready":
++      return "Nuvio non è ancora pronto.";
++    case "tv_offline":
++      return "Nuvio non è aperto sulla TV, oppure non è connesso.";
++    case "timeout":
++      return "La TV non ha risposto.";
++    default:
++      return reply.ok ? "Fatto." : "Non ci sono riuscita.";
++  }
++}
+diff --git a/alexa/relay-worker/tsconfig.json b/alexa/relay-worker/tsconfig.json
+new file mode 100644
+index 0000000..bc2b024
+--- /dev/null
++++ b/alexa/relay-worker/tsconfig.json
+@@ -0,0 +1,13 @@
++{
++  "compilerOptions": {
++    "target": "ES2022",
++    "module": "ES2022",
++    "moduleResolution": "Bundler",
++    "lib": ["ES2022"],
++    "types": ["@cloudflare/workers-types"],
++    "strict": true,
++    "noEmit": true,
++    "skipLibCheck": true
++  },
++  "include": ["src"]
++}
+diff --git a/alexa/relay-worker/wrangler.toml b/alexa/relay-worker/wrangler.toml
+new file mode 100644
+index 0000000..4a32a92
+--- /dev/null
++++ b/alexa/relay-worker/wrangler.toml
+@@ -0,0 +1,21 @@
++name = "nuvio-alexa-relay"
++main = "src/index.ts"
++compatibility_date = "2026-10-01"
++
++[observability]
++enabled = true
++
++[[durable_objects.bindings]]
++name = "RELAY"
++class_name = "TvRelay"
++
++# SQLite-backed Durable Objects are available on the Workers Free plan.
++[[migrations]]
++tag = "v1"
++new_sqlite_classes = ["TvRelay"]
++
++[vars]
++# Alexa developer console -> your skill -> "Copy Skill ID"
++ALEXA_SKILL_ID = "amzn1.ask.skill.REPLACE-ME"
++
++# TV_TOKEN is a secret: `npx wrangler secret put TV_TOKEN`
+diff --git a/alexa/skill/interaction-model.it-IT.json b/alexa/skill/interaction-model.it-IT.json
+new file mode 100644
+index 0000000..716884d
+--- /dev/null
++++ b/alexa/skill/interaction-model.it-IT.json
+@@ -0,0 +1,206 @@
++{
++  "interactionModel": {
++    "languageModel": {
++      "invocationName": "nuvio tv",
++      "intents": [
++        {
++          "name": "AMAZON.CancelIntent",
++          "samples": []
++        },
++        {
++          "name": "AMAZON.HelpIntent",
++          "samples": []
++        },
++        {
++          "name": "AMAZON.StopIntent",
++          "samples": []
++        },
++        {
++          "name": "AMAZON.NavigateHomeIntent",
++          "samples": []
++        },
++        {
++          "name": "AMAZON.FallbackIntent",
++          "samples": []
++        },
++        {
++          "name": "PausaIntent",
++          "slots": [],
++          "samples": [
++            "pausa",
++            "metti in pausa",
++            "metti pausa",
++            "mettere in pausa",
++            "fai una pausa",
++            "fare una pausa",
++            "pausa il video",
++            "metti in pausa il video",
++            "mettere in pausa il video",
++            "blocca il video",
++            "bloccare il video"
++          ]
++        },
++        {
++          "name": "RiprendiIntent",
++          "slots": [],
++          "samples": [
++            "riprendi",
++            "riprendere",
++            "continua",
++            "continuare",
++            "play",
++            "fai ripartire",
++            "far ripartire",
++            "riparti",
++            "ripartire",
++            "riprendi il video",
++            "riprendere il video",
++            "fai ripartire il video",
++            "far ripartire il video",
++            "togli la pausa",
++            "togliere la pausa"
++          ]
++        },
++        {
++          "name": "AvantiIntent",
++          "slots": [
++            {
++              "name": "durata",
++              "type": "AMAZON.DURATION"
++            }
++          ],
++          "samples": [
++            "avanti",
++            "vai avanti",
++            "andare avanti",
++            "avanti di {durata}",
++            "vai avanti di {durata}",
++            "andare avanti di {durata}",
++            "salta avanti di {durata}",
++            "saltare avanti di {durata}",
++            "porta avanti di {durata}",
++            "portare avanti di {durata}",
++            "manda avanti di {durata}",
++            "mandare avanti di {durata}"
++          ]
++        },
++        {
++          "name": "IndietroIntent",
++          "slots": [
++            {
++              "name": "durata",
++              "type": "AMAZON.DURATION"
++            }
++          ],
++          "samples": [
++            "indietro",
++            "torna indietro",
++            "tornare indietro",
++            "indietro di {durata}",
++            "torna indietro di {durata}",
++            "tornare indietro di {durata}",
++            "vai indietro di {durata}",
++            "andare indietro di {durata}",
++            "riavvolgi di {durata}",
++            "riavvolgere di {durata}",
++            "manda indietro di {durata}",
++            "mandare indietro di {durata}"
++          ]
++        },
++        {
++          "name": "VaiAlMinutoIntent",
++          "slots": [
++            {
++              "name": "minuti",
++              "type": "AMAZON.NUMBER"
++            },
++            {
++              "name": "ore",
++              "type": "AMAZON.NUMBER"
++            }
++          ],
++          "samples": [
++            "vai al minuto {minuti}",
++            "andare al minuto {minuti}",
++            "salta al minuto {minuti}",
++            "saltare al minuto {minuti}",
++            "portami al minuto {minuti}",
++            "portarmi al minuto {minuti}",
++            "riparti dal minuto {minuti}",
++            "ripartire dal minuto {minuti}",
++            "vai a {ore} ora e {minuti} minuti",
++            "vai a {ore} ore e {minuti} minuti",
++            "andare a {ore} ora e {minuti} minuti",
++            "andare a {ore} ore e {minuti} minuti"
++          ]
++        },
++        {
++          "name": "ProssimoEpisodioIntent",
++          "slots": [],
++          "samples": [
++            "prossimo episodio",
++            "episodio successivo",
++            "il prossimo episodio",
++            "metti il prossimo episodio",
++            "mettere il prossimo episodio",
++            "vai al prossimo episodio",
++            "andare al prossimo episodio",
++            "passa al prossimo episodio",
++            "passare al prossimo episodio",
++            "next"
++          ]
++        },
++        {
++          "name": "SaltaIntroIntent",
++          "slots": [],
++          "samples": [
++            "salta l'intro",
++            "saltare l'intro",
++            "salta la sigla",
++            "saltare la sigla",
++            "salta il riassunto",
++            "saltare il riassunto",
++            "salta i titoli",
++            "saltare i titoli",
++            "salta l'introduzione",
++            "saltare l'introduzione"
++          ]
++        },
++        {
++          "name": "ChiudiVideoIntent",
++          "slots": [],
++          "samples": [
++            "chiudi il video",
++            "chiudere il video",
++            "chiudi il player",
++            "chiudere il player",
++            "esci dal video",
++            "uscire dal video",
++            "interrompi la riproduzione",
++            "interrompere la riproduzione"
++          ]
++        },
++        {
++          "name": "CercaIntent",
++          "slots": [
++            {
++              "name": "titolo",
++              "type": "AMAZON.SearchQuery"
++            }
++          ],
++          "samples": [
++            "cerca {titolo}",
++            "cercare {titolo}",
++            "cercami {titolo}",
++            "trova {titolo}",
++            "trovare {titolo}",
++            "trovami {titolo}",
++            "fai una ricerca di {titolo}",
++            "fare una ricerca di {titolo}"
++          ]
++        }
++      ],
++      "types": []
++    }
++  }
++}
+diff --git a/app/build.gradle.kts b/app/build.gradle.kts
+index e57ec77..e815a03 100644
+--- a/app/build.gradle.kts
++++ b/app/build.gradle.kts
+@@ -145,6 +145,9 @@ android {
+         buildConfigField("String", "IMDB_TAPFRAME_API_BASE_URL", "\"${localProperties.getProperty("IMDB_TAPFRAME_API_BASE_URL", "")}\"")
+         buildConfigField("String", "TRAKT_CLIENT_ID", "\"${localProperties.getProperty("TRAKT_CLIENT_ID", "")}\"")
+         buildConfigField("String", "TRAKT_CLIENT_SECRET", "\"${localProperties.getProperty("TRAKT_CLIENT_SECRET", "")}\"")
++        // Alexa voice control relay (Cloudflare Worker). Leave blank to disable.
++        buildConfigField("String", "VOICE_RELAY_URL", "\"${localProperties.getProperty("VOICE_RELAY_URL", "")}\"")
++        buildConfigField("String", "VOICE_RELAY_TOKEN", "\"${localProperties.getProperty("VOICE_RELAY_TOKEN", "")}\"")
+         buildConfigField("String", "TRAKT_API_URL", "\"${localProperties.getProperty("TRAKT_API_URL", "https://api.trakt.tv/")}\"")
+         buildConfigField("String", "TRAKT_REDIRECT_URI", "\"${localProperties.getProperty("TRAKT_REDIRECT_URI", "urn:ietf:wg:oauth:2.0:oob")}\"")
+         buildConfigField("String", "SIMKL_CLIENT_ID", buildConfigString(resolveProperty(devProperties, localProperties, "SIMKL_CLIENT_ID")))
+diff --git a/app/src/main/java/com/nuvio/tv/MainActivity.kt b/app/src/main/java/com/nuvio/tv/MainActivity.kt
+index f30f618..635fc80 100644
+--- a/app/src/main/java/com/nuvio/tv/MainActivity.kt
++++ b/app/src/main/java/com/nuvio/tv/MainActivity.kt
+@@ -54,6 +54,7 @@ import androidx.compose.material.icons.filled.Home
+ import androidx.compose.material.icons.filled.Search
+ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.CompositionLocalProvider
++import androidx.compose.runtime.DisposableEffect
+ import androidx.compose.runtime.LaunchedEffect
+ import androidx.compose.runtime.collectAsState
+ import androidx.compose.runtime.compositionLocalOf
+@@ -328,6 +329,12 @@ open class MainActivity : ComponentActivity() {
+     @Inject
+     lateinit var partyRepository: PartyRepository
+ 
++    @Inject
++    lateinit var voiceCommandBus: com.nuvio.tv.core.voice.VoiceCommandBus
++
++    @Inject
++    lateinit var voiceCommandClient: com.nuvio.tv.core.voice.VoiceCommandClient
++
+     private val pendingDeepLinkUrl = MutableStateFlow<String?>(null)
+     private val pendingLaunchIntent = MutableStateFlow<Intent?>(null)
+ 
+@@ -987,6 +994,29 @@ open class MainActivity : ComponentActivity() {
+                         }
+                     }
+ 
++                    // Alexa voice control fallback handler (lowest priority): anything the
++                    // player didn't claim lands here. Search navigates; player commands report
++                    // that nothing is playing.
++                    DisposableEffect(navController, layoutChosen) {
++                        val unregister = voiceCommandBus.register(com.nuvio.tv.core.voice.VoiceCommandBus.PRIORITY_APP) { command ->
++                            when (command) {
++                                is com.nuvio.tv.core.voice.VoiceCommand.Search -> {
++                                    if (!layoutChosen) {
++                                        com.nuvio.tv.core.voice.VoiceResult.fail("not_ready")
++                                    } else {
++                                        voiceCommandBus.requestSearch(command.query)
++                                        navController.navigate(Screen.Search.route) {
++                                            launchSingleTop = true
++                                        }
++                                        com.nuvio.tv.core.voice.VoiceResult.ok("searching")
++                                    }
++                                }
++                                else -> com.nuvio.tv.core.voice.VoiceResult.fail("nothing_playing")
++                            }
++                        }
++                        onDispose { unregister() }
++                    }
++
+                     LaunchedEffect(navController, layoutChosen, pendingDeepLink) {
+                         val url = pendingDeepLink ?: return@LaunchedEffect
+                         if (!layoutChosen) return@LaunchedEffect
+@@ -1377,12 +1407,14 @@ open class MainActivity : ComponentActivity() {
+         super.onStart()
+         startupSyncService.startPeriodicSurfacePulls()
+         androidTvChannelSyncService.onForegroundChanged(true)
++        voiceCommandClient.start()
+     }
+ 
+     override fun onStop() {
+         externalPlaybackTracker.onExternalPlayerCoveredApp()
+         super.onStop()
+         startupSyncService.stopPeriodicSurfacePulls()
++        voiceCommandClient.stop()
+         // App going to background (e.g. user returning to the launcher): reconcile the
+         // Continue Watching channel once so Projectivy repaints it with fresh progress.
+         androidTvChannelSyncService.onForegroundChanged(false)
+diff --git a/app/src/main/java/com/nuvio/tv/core/voice/VoiceCommand.kt b/app/src/main/java/com/nuvio/tv/core/voice/VoiceCommand.kt
+new file mode 100644
+index 0000000..1405447
+--- /dev/null
++++ b/app/src/main/java/com/nuvio/tv/core/voice/VoiceCommand.kt
+@@ -0,0 +1,49 @@
++package com.nuvio.tv.core.voice
++
++import org.json.JSONObject
++
++/**
++ * A remote voice command relayed from the Alexa skill (via the Cloudflare relay Worker).
++ *
++ * Wire format (relay -> TV), one JSON object per WebSocket text frame:
++ *   {"id":"<uuid>","cmd":"pause"}
++ *   {"id":"<uuid>","cmd":"seek_by","ms":-30000}
++ *   {"id":"<uuid>","cmd":"search","query":"the bear"}
++ *
++ * Reply (TV -> relay): {"id":"<uuid>","ok":true,"code":"paused"}
++ */
++sealed interface VoiceCommand {
++    data object Pause : VoiceCommand
++    data object Resume : VoiceCommand
++    data class SeekBy(val deltaMs: Long) : VoiceCommand
++    data class SeekTo(val positionMs: Long) : VoiceCommand
++    data object NextEpisode : VoiceCommand
++    data object SkipIntro : VoiceCommand
++    data object Stop : VoiceCommand
++    data class Search(val query: String) : VoiceCommand
++
++    companion object {
++        fun fromJson(json: JSONObject): VoiceCommand? = when (json.optString("cmd")) {
++            "pause" -> Pause
++            "resume" -> Resume
++            "seek_by" -> json.optLong("ms", 0L).takeIf { it != 0L }?.let(::SeekBy)
++            "seek_to" -> json.optLong("ms", -1L).takeIf { it >= 0L }?.let(::SeekTo)
++            "next_episode" -> NextEpisode
++            "skip_intro" -> SkipIntro
++            "stop" -> Stop
++            "search" -> json.optString("query").trim().takeIf { it.isNotEmpty() }?.let(::Search)
++            else -> null
++        }
++    }
++}
++
++/**
++ * Outcome of a command. [code] is a stable machine-readable string; the relay maps it to
++ * the spoken Italian reply, so the app never has to localize Alexa responses.
++ */
++data class VoiceResult(val ok: Boolean, val code: String) {
++    companion object {
++        fun ok(code: String) = VoiceResult(true, code)
++        fun fail(code: String) = VoiceResult(false, code)
++    }
++}
+diff --git a/app/src/main/java/com/nuvio/tv/core/voice/VoiceCommandBus.kt b/app/src/main/java/com/nuvio/tv/core/voice/VoiceCommandBus.kt
+new file mode 100644
+index 0000000..fcc0a90
+--- /dev/null
++++ b/app/src/main/java/com/nuvio/tv/core/voice/VoiceCommandBus.kt
+@@ -0,0 +1,66 @@
++package com.nuvio.tv.core.voice
++
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.flow.MutableStateFlow
++import kotlinx.coroutines.flow.StateFlow
++import kotlinx.coroutines.flow.asStateFlow
++import kotlinx.coroutines.withContext
++import java.util.concurrent.CopyOnWriteArrayList
++import javax.inject.Inject
++import javax.inject.Singleton
++
++/**
++ * Routes voice commands to whichever screen can handle them.
++ *
++ * Screens register a [Handler] while they are composed (see `DisposableEffect` in
++ * PlayerScreen / MainActivity). Handlers are asked in descending [priority] order (most
++ * recent first on ties); returning `null` means "not mine, ask the next one". So while the
++ * player is on screen it gets first pick, and the app-level navigation handler is the fallback.
++ */
++@Singleton
++class VoiceCommandBus @Inject constructor() {
++
++    fun interface Handler {
++        /** Runs on the main thread. Return null to pass the command on. */
++        fun handle(command: VoiceCommand): VoiceResult?
++    }
++
++    private class Entry(val priority: Int, val handler: Handler)
++
++    private val handlers = CopyOnWriteArrayList<Entry>()
++
++    private val _pendingSearchQuery = MutableStateFlow<String?>(null)
++
++    /** Set by the navigation handler; consumed by SearchViewModel once the Search screen exists. */
++    val pendingSearchQuery: StateFlow<String?> = _pendingSearchQuery.asStateFlow()
++
++    fun requestSearch(query: String) {
++        _pendingSearchQuery.value = query
++    }
++
++    fun consumeSearch(query: String) {
++        _pendingSearchQuery.compareAndSet(query, null)
++    }
++
++    /** Registers [handler]; invoke the returned function to unregister. */
++    fun register(priority: Int, handler: Handler): () -> Unit {
++        val entry = Entry(priority, handler)
++        handlers.add(entry)
++        return { handlers.remove(entry) }
++    }
++
++    suspend fun dispatch(command: VoiceCommand): VoiceResult = withContext(Dispatchers.Main.immediate) {
++        val snapshot = handlers.toList().asReversed().sortedByDescending { it.priority }
++        for (entry in snapshot) {
++            val result = runCatching { entry.handler.handle(command) }
++                .getOrElse { return@withContext VoiceResult.fail("error") }
++            if (result != null) return@withContext result
++        }
++        VoiceResult.fail("not_available")
++    }
++
++    companion object {
++        const val PRIORITY_APP = 0
++        const val PRIORITY_PLAYER = 100
++    }
++}
+diff --git a/app/src/main/java/com/nuvio/tv/core/voice/VoiceCommandClient.kt b/app/src/main/java/com/nuvio/tv/core/voice/VoiceCommandClient.kt
+new file mode 100644
+index 0000000..9117b73
+--- /dev/null
++++ b/app/src/main/java/com/nuvio/tv/core/voice/VoiceCommandClient.kt
+@@ -0,0 +1,133 @@
++package com.nuvio.tv.core.voice
++
++import android.util.Log
++import com.nuvio.tv.BuildConfig
++import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.Job
++import kotlinx.coroutines.SupervisorJob
++import kotlinx.coroutines.delay
++import kotlinx.coroutines.launch
++import okhttp3.OkHttpClient
++import okhttp3.Request
++import okhttp3.Response
++import okhttp3.WebSocket
++import okhttp3.WebSocketListener
++import org.json.JSONObject
++import java.util.concurrent.TimeUnit
++import javax.inject.Inject
++import javax.inject.Singleton
++
++/**
++ * Keeps a WebSocket open to the Alexa relay Worker while the app is in the foreground
++ * (MainActivity.onStart -> [start], onStop -> [stop]). Incoming commands are dispatched
++ * through [VoiceCommandBus] and the result is sent back so Alexa can say what happened.
++ *
++ * Disabled unless VOICE_RELAY_URL and VOICE_RELAY_TOKEN are set in local.properties.
++ */
++@Singleton
++class VoiceCommandClient @Inject constructor(
++    baseClient: OkHttpClient,
++    private val bus: VoiceCommandBus,
++) {
++    private val client: OkHttpClient = baseClient.newBuilder()
++        .cache(null)
++        .readTimeout(0, TimeUnit.MILLISECONDS)
++        .pingInterval(25, TimeUnit.SECONDS)
++        .build()
++
++    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
++    private val relayUrl = BuildConfig.VOICE_RELAY_URL.trim()
++    private val token = BuildConfig.VOICE_RELAY_TOKEN.trim()
++
++    @Volatile private var socket: WebSocket? = null
++    @Volatile private var wanted = false
++    private var reconnectJob: Job? = null
++    private var attempt = 0
++
++    val isConfigured: Boolean get() = relayUrl.isNotEmpty() && token.isNotEmpty()
++
++    @Synchronized
++    fun start() {
++        if (!isConfigured || wanted) return
++        wanted = true
++        attempt = 0
++        connect()
++    }
++
++    @Synchronized
++    fun stop() {
++        wanted = false
++        reconnectJob?.cancel()
++        reconnectJob = null
++        socket?.close(NORMAL_CLOSURE, "app in background")
++        socket = null
++    }
++
++    @Synchronized
++    private fun connect() {
++        if (!wanted) return
++        val request = Request.Builder()
++            .url(relayUrl.trimEnd('/') + "/tv")
++            .header("Authorization", "Bearer $token")
++            .build()
++        socket = client.newWebSocket(request, Listener())
++    }
++
++    @Synchronized
++    private fun scheduleReconnect(failed: WebSocket) {
++        if (!wanted || socket !== failed) return
++        socket = null
++        val backoffMs = (1_000L shl attempt.coerceAtMost(6)).coerceAtMost(60_000L)
++        attempt++
++        reconnectJob?.cancel()
++        reconnectJob = scope.launch {
++            delay(backoffMs)
++            connect()
++        }
++    }
++
++    private inner class Listener : WebSocketListener() {
++        override fun onOpen(webSocket: WebSocket, response: Response) {
++            synchronized(this@VoiceCommandClient) { attempt = 0 }
++            Log.i(TAG, "connected to voice relay")
++        }
++
++        override fun onMessage(webSocket: WebSocket, text: String) {
++            val json = runCatching { JSONObject(text) }.getOrNull() ?: return
++            val id = json.optString("id").takeIf { it.isNotEmpty() } ?: return
++            scope.launch {
++                val command = VoiceCommand.fromJson(json)
++                val result = if (command == null) {
++                    VoiceResult.fail("unknown_command")
++                } else {
++                    bus.dispatch(command)
++                }
++                Log.d(TAG, "command=$command result=$result")
++                val reply = JSONObject()
++                    .put("id", id)
++                    .put("ok", result.ok)
++                    .put("code", result.code)
++                webSocket.send(reply.toString())
++            }
++        }
++
++        override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
++            webSocket.close(NORMAL_CLOSURE, null)
++        }
++
++        override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
++            scheduleReconnect(webSocket)
++        }
++
++        override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
++            Log.w(TAG, "voice relay connection failed (${response?.code}): ${t.message}")
++            scheduleReconnect(webSocket)
++        }
++    }
++
++    private companion object {
++        const val TAG = "VoiceCommandClient"
++        const val NORMAL_CLOSURE = 1000
++    }
++}
+diff --git a/app/src/main/java/com/nuvio/tv/ui/screens/player/PlayerScreen.kt b/app/src/main/java/com/nuvio/tv/ui/screens/player/PlayerScreen.kt
+index 63bd783..957c655 100644
+--- a/app/src/main/java/com/nuvio/tv/ui/screens/player/PlayerScreen.kt
++++ b/app/src/main/java/com/nuvio/tv/ui/screens/player/PlayerScreen.kt
+@@ -265,6 +265,14 @@ fun PlayerScreen(
+             completed
+         )
+     }
++    // Alexa voice control: the player gets first pick of incoming commands while on screen.
++    val latestExitPlayer by rememberUpdatedState(exitPlayer)
++    DisposableEffect(viewModel) {
++        val unregister = viewModel.voiceCommandBus.register(com.nuvio.tv.core.voice.VoiceCommandBus.PRIORITY_PLAYER) { command ->
++            viewModel.handleVoiceCommand(command, exitPlayer = { latestExitPlayer() })
++        }
++        onDispose { unregister() }
++    }
+     val exitPlayerFromError: () -> Unit = exitPlayerFromError@{
+         if (exitDispatched) return@exitPlayerFromError
+         exitDispatched = true
+diff --git a/app/src/main/java/com/nuvio/tv/ui/screens/player/PlayerViewModel.kt b/app/src/main/java/com/nuvio/tv/ui/screens/player/PlayerViewModel.kt
+index e0066e8..45cf78d 100644
+--- a/app/src/main/java/com/nuvio/tv/ui/screens/player/PlayerViewModel.kt
++++ b/app/src/main/java/com/nuvio/tv/ui/screens/player/PlayerViewModel.kt
+@@ -100,6 +100,7 @@ class PlayerViewModel @Inject constructor(
+     private val tvRecommendationManager: com.nuvio.tv.core.recommendations.TvRecommendationManager,
+     private val serverPlayback: com.nuvio.tv.data.mediaserver.ServerPlayback,
+     private val serverStreams: com.nuvio.tv.data.mediaserver.ServerStreams,
++    val voiceCommandBus: com.nuvio.tv.core.voice.VoiceCommandBus,
+     partyRepository: com.nuvio.tv.core.party.PartyRepository,
+     profileManager: com.nuvio.tv.core.profile.ProfileManager,
+     savedStateHandle: SavedStateHandle
+diff --git a/app/src/main/java/com/nuvio/tv/ui/screens/player/PlayerVoiceCommands.kt b/app/src/main/java/com/nuvio/tv/ui/screens/player/PlayerVoiceCommands.kt
+new file mode 100644
+index 0000000..0489fb5
+--- /dev/null
++++ b/app/src/main/java/com/nuvio/tv/ui/screens/player/PlayerVoiceCommands.kt
+@@ -0,0 +1,80 @@
++package com.nuvio.tv.ui.screens.player
++
++import com.nuvio.tv.core.voice.VoiceCommand
++import com.nuvio.tv.core.voice.VoiceResult
++
++/**
++ * Maps Alexa voice commands onto the player's existing [PlayerEvent]s, so voice goes through
++ * exactly the same code paths as the remote (watch-party locking, scrobbling, overlays...).
++ *
++ * Returns null for commands the player does not own, letting the app-level handler try.
++ */
++internal fun PlayerViewModel.handleVoiceCommand(
++    command: VoiceCommand,
++    exitPlayer: () -> Unit,
++): VoiceResult? {
++    val state = uiState.value
++    val timeline = playbackTimeline.value
++    return when (command) {
++        VoiceCommand.Pause -> when {
++            state.isPlaying -> {
++                onEvent(PlayerEvent.OnPlayPause)
++                VoiceResult.ok("paused")
++            }
++            // OnPlayPause toggles on the engine's isPlaying, which is false while buffering,
++            // so toggling here would start playback instead of pausing it.
++            state.isBuffering -> VoiceResult.fail("buffering")
++            else -> VoiceResult.ok("already_paused")
++        }
++
++        VoiceCommand.Resume -> when {
++            state.isPlaying -> VoiceResult.ok("already_playing")
++            else -> {
++                onEvent(PlayerEvent.OnPlayPause)
++                VoiceResult.ok("resumed")
++            }
++        }
++
++        is VoiceCommand.SeekBy -> when {
++            timeline.isLive -> VoiceResult.fail("live")
++            else -> {
++                onEvent(PlayerEvent.OnSeekBy(deltaMs = command.deltaMs))
++                VoiceResult.ok(if (command.deltaMs > 0) "seeked_forward" else "seeked_back")
++            }
++        }
++
++        is VoiceCommand.SeekTo -> when {
++            timeline.isLive -> VoiceResult.fail("live")
++            timeline.duration > 0L && command.positionMs >= timeline.duration -> VoiceResult.fail("beyond_end")
++            else -> {
++                onEvent(PlayerEvent.OnSeekTo(position = command.positionMs))
++                VoiceResult.ok("seeked_to")
++            }
++        }
++
++        VoiceCommand.NextEpisode -> when {
++            state.nextEpisode != null -> {
++                onEvent(PlayerEvent.OnPlayNextEpisode)
++                VoiceResult.ok("next_episode")
++            }
++            else -> VoiceResult.fail("no_next_episode")
++        }
++
++        VoiceCommand.SkipIntro -> when {
++            state.activeSkipInterval != null -> {
++                onEvent(PlayerEvent.OnSkipIntro)
++                VoiceResult.ok("skipped_intro")
++            }
++            else -> VoiceResult.fail("no_intro")
++        }
++
++        VoiceCommand.Stop -> {
++            exitPlayer()
++            VoiceResult.ok("stopped")
++        }
++
++        // Navigating away mid-playback would leave the player in a half-released state;
++        // ask the user to stop first instead.
++        is VoiceCommand.Search -> VoiceResult.fail("stop_playback_first")
++    }
++}
+diff --git a/app/src/main/java/com/nuvio/tv/ui/screens/search/SearchViewModel.kt b/app/src/main/java/com/nuvio/tv/ui/screens/search/SearchViewModel.kt
+index c7fac29..216fd05 100644
+--- a/app/src/main/java/com/nuvio/tv/ui/screens/search/SearchViewModel.kt
++++ b/app/src/main/java/com/nuvio/tv/ui/screens/search/SearchViewModel.kt
+@@ -59,6 +59,7 @@ class SearchViewModel @Inject constructor(
+     private val watchedSeriesStateHolder: com.nuvio.tv.data.local.WatchedSeriesStateHolder,
+     val posterOptions: com.nuvio.tv.ui.components.posteroptions.PosterOptionsController,
+     private val serverCatalog: ServerCatalog,
++    private val voiceCommandBus: com.nuvio.tv.core.voice.VoiceCommandBus,
+     @ApplicationContext private val context: Context
+ ) : ViewModel() {
+ 
+@@ -119,6 +120,15 @@ class SearchViewModel @Inject constructor(
+ 
+     init {
+         posterOptions.bind(viewModelScope)
++        // Alexa "cerca <titolo>": fill the field and submit, exactly like typing + Done.
++        viewModelScope.launch {
++            voiceCommandBus.pendingSearchQuery.collect { query ->
++                if (query == null) return@collect
++                onEvent(SearchEvent.QueryChanged(query))
++                onEvent(SearchEvent.SubmitSearch)
++                voiceCommandBus.consumeSearch(query)
++            }
++        }
+         viewModelScope.launch {
+             watchProgressRepository.observeWatchedMovieIds()
+                 .collect { ids -> _watchedMovieIds.value = ids }
+diff --git a/local.example.properties b/local.example.properties
+index 9330d5d..367a688 100644
+--- a/local.example.properties
++++ b/local.example.properties
+@@ -31,3 +31,7 @@ DOVI_ENABLE_REAL_LINK=true
+ # DOVI_LIBDOVI_STATIC_LIB=/path/to/libdovi.a
+ # DOVI_LIBDOVI_INCLUDE_DIR=/path/to/libdovi/include
+ DOVI_LIBDOVI_PREBUILT_ROOT=DV7/libdovi
++
++# Alexa voice control (see alexa/README.md). Leave blank to disable.
++# VOICE_RELAY_URL=https://nuvio-alexa-relay.<your-subdomain>.workers.dev
++# VOICE_RELAY_TOKEN=<same value as the Worker's TV_TOKEN secret>
+-- 
+2.43.0
+
+
+From ebacf24f857592d2d01dbbfc494ceefe3489010a Mon Sep 17 00:00:00 2001
+From: Fabrizio Catitti <fabrizio.catitti@gmail.com>
+Date: Sat, 24 Oct 2026 11:28:50 +0200
+Subject: [PATCH 2/6] feat(voice): English (en-US, en-GB) Alexa models and
+ replies
+
+Replies follow the request locale (it-* / en-*); intent and slot names are
+shared across locales so the TV protocol is unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JQ7oit84w6xrrRhN57hYZw
+---
+ alexa/README.md                          |  23 ++-
+ alexa/relay-worker/src/index.ts          |   4 +-
+ alexa/relay-worker/src/intents.ts        | 206 +++++++++++++++--------
+ alexa/skill/interaction-model.en-GB.json | 184 ++++++++++++++++++++
+ alexa/skill/interaction-model.en-US.json | 184 ++++++++++++++++++++
+ 5 files changed, 523 insertions(+), 78 deletions(-)
+ create mode 100644 alexa/skill/interaction-model.en-GB.json
+ create mode 100644 alexa/skill/interaction-model.en-US.json
+
+diff --git a/alexa/README.md b/alexa/README.md
+index 6844a40..9935d30 100644
+--- a/alexa/README.md
++++ b/alexa/README.md
+@@ -5,6 +5,12 @@ Control Nuvio on the TV from an Echo while the app is open:
+ > "Alexa, chiedi a nuvio tv di mettere in pausa"
+ > "Alexa, chiedi a nuvio tv di andare avanti di due minuti"
+ > "Alexa, chiedi a nuvio tv di cercare the bear"
++> "Alexa, ask nuvio tv to skip forward two minutes"
++
++The skill ships Italian (it-IT) and English (en-US, en-GB) models, and Alexa answers in the
++language of the request. **The Echo's language setting decides which model is used**
++(Alexa app → Devices → your Echo → Language). An Echo set to Italian only matches the
++it-IT model, and one set to English (UK) only matches en-GB.
+ 
+ ```
+ Echo ─▶ Alexa cloud ─HTTPS─▶ relay Worker /alexa ─▶ Durable Object ─WebSocket─▶ Nuvio (TV)
+@@ -27,7 +33,12 @@ or with the app in the background.
+ | chiudere il video | exit the player |
+ | cercare *titolo* | open Search with the query (only when no video is playing) |
+ 
+-You can also say "Alexa, apri nuvio tv" and then give the command without the prefix.
++English, after "ask nuvio tv to…": pause · resume · skip forward 30 seconds · go back 2 minutes ·
++go to minute 20 · go to 1 hour and 5 minutes · play the next episode · skip the intro / recap ·
++close the video · search for *title*.
++
++You can also say "Alexa, apri nuvio tv" (or "Alexa, open nuvio tv") and then give the command
++without the prefix.
+ 
+ ## 1. Deploy the relay (Cloudflare Workers, Free plan is enough)
+ 
+@@ -42,9 +53,11 @@ npx wrangler deploy             # note the https://nuvio-alexa-relay.<sub>.worke
+ 
+ ## 2. Create the skill (developer.amazon.com → Alexa Skills Kit)
+ 
+-1. **Create Skill**: name "Nuvio TV", locale **Italian (IT)**, model **Custom**, hosting
+-   **Provision your own**, template **Start from scratch**.
+-2. **Interaction Model → JSON Editor**: paste `skill/interaction-model.it-IT.json`, then **Save** and **Build**.
++1. **Create Skill**: name "Nuvio TV", primary locale matching your Echo's language (e.g. **English (UK)**
++   or **Italian (IT)**), model **Custom**, hosting **Provision your own**, template **Start from scratch**.
++   You can add more languages afterwards from the language drop-down → *Language settings*.
++2. **Interaction Model → JSON Editor**: for each language, paste the matching file
++   (`skill/interaction-model.en-GB.json`, `…en-US.json` or `…it-IT.json`), then **Save** and **Build**.
+ 3. **Endpoint**: choose **HTTPS** and enter `https://nuvio-alexa-relay.<sub>.workers.dev/alexa`.
+    For the SSL type pick *"My development endpoint is a sub-domain of a domain that has a wildcard
+    certificate from a certificate authority"*.
+@@ -90,7 +103,7 @@ Build and install as usual. With both values blank the feature stays off
+ | `ui/screens/player/PlayerVoiceCommands.kt` | maps commands onto existing `PlayerEvent`s |
+ | `PlayerScreen.kt`, `MainActivity.kt`, `SearchViewModel.kt` | handler registration, socket lifecycle, voice search |
+ | `alexa/relay-worker/` | Worker and Durable Object relay |
+-| `alexa/skill/` | it-IT interaction model |
++| `alexa/skill/` | interaction models (it-IT, en-US, en-GB) |
+ 
+ To add a command: add it to `VoiceCommand` (Kotlin) and `TvCommand` (TS), handle it in
+ `PlayerVoiceCommands.kt`, add an intent to the model and `mapRequest`, and add a reply in `speakResult`.
+diff --git a/alexa/relay-worker/src/index.ts b/alexa/relay-worker/src/index.ts
+index aa94996..b67af9f 100644
+--- a/alexa/relay-worker/src/index.ts
++++ b/alexa/relay-worker/src/index.ts
+@@ -9,7 +9,7 @@
+  */
+ 
+ import { AlexaVerificationError, verifyAlexaRequest } from "./alexa-verify";
+-import { mapRequest, say, speakResult, type TvCommand, type TvReply } from "./intents";
++import { langOf, mapRequest, say, speakResult, type TvCommand, type TvReply } from "./intents";
+ 
+ export interface Env {
+   RELAY: DurableObjectNamespace;
+@@ -62,7 +62,7 @@ async function handleAlexa(request: Request, env: Env): Promise<Response> {
+     body: JSON.stringify(outcome.command),
+   });
+   const reply = (await res.json()) as TvReply;
+-  return Response.json(say(speakResult(outcome.command, reply)));
++  return Response.json(say(speakResult(outcome.command, reply, langOf(envelope.request?.locale))));
+ }
+ 
+ async function handleTv(request: Request, env: Env): Promise<Response> {
+diff --git a/alexa/relay-worker/src/intents.ts b/alexa/relay-worker/src/intents.ts
+index f2d9ee9..2260b21 100644
+--- a/alexa/relay-worker/src/intents.ts
++++ b/alexa/relay-worker/src/intents.ts
+@@ -1,5 +1,7 @@
+ /**
+- * Alexa (it-IT) intent -> TV command mapping, and TV result code -> spoken reply.
++ * Alexa intent -> TV command mapping, and TV result code -> spoken reply.
++ * Intent and slot names are shared by every locale's interaction model; only the spoken
++ * text differs. The language follows the request's `locale` (it-* or en-*).
+  * Pure functions so they can be unit-tested outside the Workers runtime.
+  */
+ 
+@@ -27,14 +29,106 @@ export interface AlexaResponse {
+   };
+ }
+ 
++export type Lang = "it" | "en";
++
+ type Slots = Record<string, { value?: string } | undefined>;
+ 
+ const DEFAULT_SEEK_FORWARD_MS = 30_000;
+ const DEFAULT_SEEK_BACK_MS = 10_000;
+ 
+-const HELP =
+-  "Puoi dire: metti in pausa, riprendi, vai avanti di trenta secondi, torna indietro di un minuto, " +
+-  "vai al minuto venti, prossimo episodio, salta l'intro, chiudi il video, oppure cerca seguito da un titolo.";
++export function langOf(locale: string | undefined): Lang {
++  return locale?.toLowerCase().startsWith("en") ? "en" : "it";
++}
++
++// ---------------------------------------------------------------- strings
++
++const UNITS: Record<Lang, { h: [string, string]; m: [string, string]; s: [string, string]; and: string }> = {
++  it: { h: ["ora", "ore"], m: ["minuto", "minuti"], s: ["secondo", "secondi"], and: "e" },
++  en: { h: ["hour", "hours"], m: ["minute", "minutes"], s: ["second", "seconds"], and: "and" },
++};
++
++const T = {
++  it: {
++    help:
++      "Puoi dire: metti in pausa, riprendi, vai avanti di trenta secondi, torna indietro di un minuto, " +
++      "vai al minuto venti, prossimo episodio, salta l'intro, chiudi il video, oppure cerca seguito da un titolo.",
++    ready: "Nuvio è pronto.",
++    whatNext: "Cosa vuoi fare?",
++    didntUnderstand: "Non ho capito.",
++    ok: "Ok.",
++    askMinute: "A che minuto vuoi andare?",
++    askMinuteReprompt: "Dimmi il minuto, per esempio vai al minuto venti.",
++    askQuery: "Cosa vuoi cercare?",
++    askQueryReprompt: "Dimmi il titolo da cercare.",
++    done: "Fatto.",
++    failed: "Non ci sono riuscita.",
++    codes: {
++      paused: "In pausa.",
++      already_paused: "È già in pausa.",
++      buffering: "Sta ancora caricando, riprova tra un attimo.",
++      resumed: "Riprendo.",
++      already_playing: "Sta già andando.",
++      beyond_end: "Il video è più corto di così.",
++      live: "In una diretta non posso spostarmi.",
++      next_episode: "Metto il prossimo episodio.",
++      no_next_episode: "Non c'è un episodio successivo.",
++      skipped_intro: "Saltata.",
++      no_intro: "Adesso non c'è niente da saltare.",
++      stopped: "Video chiuso.",
++      stop_playback_first: "Prima chiudi il video, poi chiedimi di cercare.",
++      nothing_playing: "Non c'è niente in riproduzione.",
++      not_ready: "Nuvio non è ancora pronto.",
++      tv_offline: "Nuvio non è aperto sulla TV, oppure non è connesso.",
++      timeout: "La TV non ha risposto.",
++    } as Record<string, string>,
++    forward: (d: string) => `Avanti di ${d}.`,
++    back: (d: string) => `Indietro di ${d}.`,
++    toMinute: (m: number) => `Vado al minuto ${m}.`,
++    toTime: (d: string) => `Vado a ${d}.`,
++    searching: (q: string) => `Cerco ${q}.`,
++  },
++  en: {
++    help:
++      "You can say: pause, resume, skip forward thirty seconds, go back one minute, go to minute twenty, " +
++      "next episode, skip the intro, close the video, or search for followed by a title.",
++    ready: "Nuvio is ready.",
++    whatNext: "What would you like to do?",
++    didntUnderstand: "Sorry, I didn't get that.",
++    ok: "Okay.",
++    askMinute: "Which minute do you want to go to?",
++    askMinuteReprompt: "Tell me the minute, for example go to minute twenty.",
++    askQuery: "What do you want to search for?",
++    askQueryReprompt: "Tell me the title to search for.",
++    done: "Done.",
++    failed: "Sorry, I couldn't do that.",
++    codes: {
++      paused: "Paused.",
++      already_paused: "It's already paused.",
++      buffering: "It's still loading, try again in a moment.",
++      resumed: "Resuming.",
++      already_playing: "It's already playing.",
++      beyond_end: "The video isn't that long.",
++      live: "I can't seek in a live stream.",
++      next_episode: "Playing the next episode.",
++      no_next_episode: "There's no next episode.",
++      skipped_intro: "Skipped.",
++      no_intro: "There's nothing to skip right now.",
++      stopped: "Video closed.",
++      stop_playback_first: "Close the video first, then ask me to search.",
++      nothing_playing: "Nothing is playing.",
++      not_ready: "Nuvio isn't ready yet.",
++      tv_offline: "Nuvio isn't open on the TV, or it isn't connected.",
++      timeout: "The TV didn't respond.",
++    } as Record<string, string>,
++    forward: (d: string) => `Skipped forward ${d}.`,
++    back: (d: string) => `Went back ${d}.`,
++    toMinute: (m: number) => `Going to minute ${m}.`,
++    toTime: (d: string) => `Going to ${d}.`,
++    searching: (q: string) => `Searching for ${q}.`,
++  },
++} satisfies Record<Lang, unknown>;
++
++// ---------------------------------------------------------------- helpers
+ 
+ /** ISO-8601 duration from AMAZON.DURATION (e.g. PT30S, PT1H5M, PT1M30S) -> milliseconds. */
+ export function parseIsoDuration(value: string | undefined): number | null {
+@@ -47,21 +141,19 @@ export function parseIsoDuration(value: string | undefined): number | null {
+   return ms > 0 ? Math.round(ms) : null;
+ }
+ 
+-function plural(n: number, one: string, many: string): string {
+-  return `${n} ${n === 1 ? one : many}`;
+-}
+-
+-/** 90000 -> "1 minuto e 30 secondi" */
+-export function speakDuration(ms: number): string {
++/** 90000 -> "1 minuto e 30 secondi" / "1 minute and 30 seconds" */
++export function speakDuration(ms: number, lang: Lang = "it"): string {
++  const u = UNITS[lang];
+   const total = Math.round(Math.abs(ms) / 1000);
+   const h = Math.floor(total / 3600);
+   const m = Math.floor((total % 3600) / 60);
+   const s = total % 60;
++  const unit = (n: number, [one, many]: [string, string]) => `${n} ${n === 1 ? one : many}`;
+   const parts: string[] = [];
+-  if (h) parts.push(plural(h, "ora", "ore"));
+-  if (m) parts.push(plural(m, "minuto", "minuti"));
+-  if (s || parts.length === 0) parts.push(plural(s, "secondo", "secondi"));
+-  return parts.length > 1 ? `${parts.slice(0, -1).join(", ")} e ${parts[parts.length - 1]}` : parts[0];
++  if (h) parts.push(unit(h, u.h));
++  if (m) parts.push(unit(m, u.m));
++  if (s || parts.length === 0) parts.push(unit(s, u.s));
++  return parts.length > 1 ? `${parts.slice(0, -1).join(", ")} ${u.and} ${parts[parts.length - 1]}` : parts[0];
+ }
+ 
+ export type IntentOutcome =
+@@ -83,15 +175,20 @@ export function silent(): AlexaResponse {
+   return { version: "1.0", response: { shouldEndSession: true } };
+ }
+ 
++// ---------------------------------------------------------------- mapping
++
+ /** Decides what to do with an Alexa request envelope's `request` object. */
+-export function mapRequest(request: { type: string; intent?: { name: string; slots?: Slots } }): IntentOutcome {
+-  if (request.type === "LaunchRequest") {
+-    return { kind: "reply", response: say(`Nuvio è pronto. ${HELP}`, false, "Cosa vuoi fare?") };
+-  }
+-  if (request.type === "SessionEndedRequest") return { kind: "reply", response: silent() };
+-  if (request.type !== "IntentRequest" || !request.intent) {
+-    return { kind: "reply", response: say("Non ho capito.") };
+-  }
++export function mapRequest(request: {
++  type: string;
++  locale?: string;
++  intent?: { name: string; slots?: Slots };
++}): IntentOutcome {
++  const t = T[langOf(request.locale)];
++  const reply = (response: AlexaResponse): IntentOutcome => ({ kind: "reply", response });
++
++  if (request.type === "LaunchRequest") return reply(say(`${t.ready} ${t.help}`, false, t.whatNext));
++  if (request.type === "SessionEndedRequest") return reply(silent());
++  if (request.type !== "IntentRequest" || !request.intent) return reply(say(t.didntUnderstand));
+ 
+   const slots = request.intent.slots ?? {};
+   const cmd = (command: TvCommand): IntentOutcome => ({ kind: "command", command });
+@@ -109,7 +206,7 @@ export function mapRequest(request: { type: string; intent?: { name: string; slo
+       const minuti = Number(slots.minuti?.value);
+       const ore = Number(slots.ore?.value ?? 0);
+       if (!Number.isFinite(minuti) || minuti < 0 || !Number.isFinite(ore) || ore < 0) {
+-        return { kind: "reply", response: say("A che minuto vuoi andare?", false, "Dimmi il minuto, per esempio vai al minuto venti.") };
++        return reply(say(t.askMinute, false, t.askMinuteReprompt));
+       }
+       return cmd({ cmd: "seek_to", ms: (ore * 3600 + minuti * 60) * 1000 });
+     }
+@@ -121,69 +218,36 @@ export function mapRequest(request: { type: string; intent?: { name: string; slo
+       return cmd({ cmd: "stop" });
+     case "CercaIntent": {
+       const query = slots.titolo?.value?.trim();
+-      if (!query) return { kind: "reply", response: say("Cosa vuoi cercare?", false, "Dimmi il titolo da cercare.") };
++      if (!query) return reply(say(t.askQuery, false, t.askQueryReprompt));
+       return cmd({ cmd: "search", query });
+     }
+     case "AMAZON.HelpIntent":
+-      return { kind: "reply", response: say(HELP, false, "Cosa vuoi fare?") };
++      return reply(say(t.help, false, t.whatNext));
+     case "AMAZON.StopIntent":
+     case "AMAZON.CancelIntent":
+     case "AMAZON.NavigateHomeIntent":
+-      return { kind: "reply", response: say("Ok.") };
++      return reply(say(t.ok));
+     case "AMAZON.FallbackIntent":
+     default:
+-      return { kind: "reply", response: say(`Non ho capito. ${HELP}`, false, "Cosa vuoi fare?") };
++      return reply(say(`${t.didntUnderstand} ${t.help}`, false, t.whatNext));
+   }
+ }
+ 
+-/** TV result code -> spoken Italian reply. */
+-export function speakResult(command: TvCommand, reply: TvReply): string {
+-  switch (reply.code) {
+-    case "paused":
+-      return "In pausa.";
+-    case "already_paused":
+-      return "È già in pausa.";
+-    case "buffering":
+-      return "Sta ancora caricando, riprova tra un attimo.";
+-    case "resumed":
+-      return "Riprendo.";
+-    case "already_playing":
+-      return "Sta già andando.";
++/** TV result code -> spoken reply in the request's language. */
++export function speakResult(command: TvCommand, result: TvReply, lang: Lang = "it"): string {
++  const t = T[lang];
++  switch (result.code) {
+     case "seeked_forward":
+-      return command.cmd === "seek_by" ? `Avanti di ${speakDuration(command.ms)}.` : "Fatto.";
++      return command.cmd === "seek_by" ? t.forward(speakDuration(command.ms, lang)) : t.done;
+     case "seeked_back":
+-      return command.cmd === "seek_by" ? `Indietro di ${speakDuration(command.ms)}.` : "Fatto.";
++      return command.cmd === "seek_by" ? t.back(speakDuration(command.ms, lang)) : t.done;
+     case "seeked_to":
+-      if (command.cmd !== "seek_to") return "Fatto.";
+-      if (command.ms < 3_600_000 && command.ms % 60_000 === 0) return `Vado al minuto ${command.ms / 60_000}.`;
+-      return `Vado a ${speakDuration(command.ms)}.`;
+-    case "beyond_end":
+-      return "Il video è più corto di così.";
+-    case "live":
+-      return "In una diretta non posso spostarmi.";
+-    case "next_episode":
+-      return "Metto il prossimo episodio.";
+-    case "no_next_episode":
+-      return "Non c'è un episodio successivo.";
+-    case "skipped_intro":
+-      return "Saltata.";
+-    case "no_intro":
+-      return "Adesso non c'è niente da saltare.";
+-    case "stopped":
+-      return "Video chiuso.";
++      if (command.cmd !== "seek_to") return t.done;
++      if (command.ms < 3_600_000 && command.ms % 60_000 === 0) return t.toMinute(command.ms / 60_000);
++      return t.toTime(speakDuration(command.ms, lang));
+     case "searching":
+-      return command.cmd === "search" ? `Cerco ${command.query}.` : "Cerco.";
+-    case "stop_playback_first":
+-      return "Prima chiudi il video, poi chiedimi di cercare.";
+-    case "nothing_playing":
+-      return "Non c'è niente in riproduzione.";
+-    case "not_ready":
+-      return "Nuvio non è ancora pronto.";
+-    case "tv_offline":
+-      return "Nuvio non è aperto sulla TV, oppure non è connesso.";
+-    case "timeout":
+-      return "La TV non ha risposto.";
++      return command.cmd === "search" ? t.searching(command.query) : t.done;
+     default:
+-      return reply.ok ? "Fatto." : "Non ci sono riuscita.";
++      return t.codes[result.code] ?? (result.ok ? t.done : t.failed);
+   }
+ }
+diff --git a/alexa/skill/interaction-model.en-GB.json b/alexa/skill/interaction-model.en-GB.json
+new file mode 100644
+index 0000000..af57d8e
+--- /dev/null
++++ b/alexa/skill/interaction-model.en-GB.json
+@@ -0,0 +1,184 @@
++{
++  "interactionModel": {
++    "languageModel": {
++      "invocationName": "nuvio tv",
++      "intents": [
++        {
++          "name": "AMAZON.CancelIntent",
++          "samples": []
++        },
++        {
++          "name": "AMAZON.HelpIntent",
++          "samples": []
++        },
++        {
++          "name": "AMAZON.StopIntent",
++          "samples": []
++        },
++        {
++          "name": "AMAZON.NavigateHomeIntent",
++          "samples": []
++        },
++        {
++          "name": "AMAZON.FallbackIntent",
++          "samples": []
++        },
++        {
++          "name": "PausaIntent",
++          "slots": [],
++          "samples": [
++            "pause",
++            "pause it",
++            "pause the video",
++            "pause the show",
++            "pause the movie",
++            "hold on",
++            "put it on pause"
++          ]
++        },
++        {
++          "name": "RiprendiIntent",
++          "slots": [],
++          "samples": [
++            "resume",
++            "resume the video",
++            "resume playback",
++            "play",
++            "continue",
++            "unpause",
++            "keep playing",
++            "carry on",
++            "start playing again"
++          ]
++        },
++        {
++          "name": "AvantiIntent",
++          "slots": [
++            {
++              "name": "durata",
++              "type": "AMAZON.DURATION"
++            }
++          ],
++          "samples": [
++            "skip forward",
++            "go forward",
++            "fast forward",
++            "skip ahead",
++            "skip forward {durata}",
++            "skip ahead {durata}",
++            "go forward {durata}",
++            "fast forward {durata}",
++            "jump ahead {durata}",
++            "forward {durata}",
++            "skip forward by {durata}",
++            "go forward by {durata}"
++          ]
++        },
++        {
++          "name": "IndietroIntent",
++          "slots": [
++            {
++              "name": "durata",
++              "type": "AMAZON.DURATION"
++            }
++          ],
++          "samples": [
++            "go back",
++            "rewind",
++            "skip back",
++            "go back {durata}",
++            "rewind {durata}",
++            "skip back {durata}",
++            "jump back {durata}",
++            "back {durata}",
++            "go back by {durata}",
++            "rewind by {durata}"
++          ]
++        },
++        {
++          "name": "VaiAlMinutoIntent",
++          "slots": [
++            {
++              "name": "minuti",
++              "type": "AMAZON.NUMBER"
++            },
++            {
++              "name": "ore",
++              "type": "AMAZON.NUMBER"
++            }
++          ],
++          "samples": [
++            "go to minute {minuti}",
++            "jump to minute {minuti}",
++            "skip to minute {minuti}",
++            "take me to minute {minuti}",
++            "start from minute {minuti}",
++            "go to {ore} hour {minuti} minutes",
++            "go to {ore} hours {minuti} minutes",
++            "go to {ore} hour and {minuti} minutes",
++            "go to {ore} hours and {minuti} minutes",
++            "jump to {ore} hour {minuti} minutes",
++            "jump to {ore} hours {minuti} minutes"
++          ]
++        },
++        {
++          "name": "ProssimoEpisodioIntent",
++          "slots": [],
++          "samples": [
++            "next episode",
++            "the next episode",
++            "play the next episode",
++            "play next episode",
++            "go to the next episode",
++            "skip to the next episode",
++            "next"
++          ]
++        },
++        {
++          "name": "SaltaIntroIntent",
++          "slots": [],
++          "samples": [
++            "skip intro",
++            "skip the intro",
++            "skip the opening",
++            "skip the recap",
++            "skip the credits",
++            "skip the opening credits",
++            "skip the theme song"
++          ]
++        },
++        {
++          "name": "ChiudiVideoIntent",
++          "slots": [],
++          "samples": [
++            "close the video",
++            "close the player",
++            "exit the video",
++            "exit the player",
++            "quit the video",
++            "end playback",
++            "stop the video"
++          ]
++        },
++        {
++          "name": "CercaIntent",
++          "slots": [
++            {
++              "name": "titolo",
++              "type": "AMAZON.SearchQuery"
++            }
++          ],
++          "samples": [
++            "search for {titolo}",
++            "search {titolo}",
++            "find {titolo}",
++            "look for {titolo}",
++            "look up {titolo}",
++            "show me {titolo}"
++          ]
++        }
++      ],
++      "types": []
++    }
++  }
++}
+diff --git a/alexa/skill/interaction-model.en-US.json b/alexa/skill/interaction-model.en-US.json
+new file mode 100644
+index 0000000..af57d8e
+--- /dev/null
++++ b/alexa/skill/interaction-model.en-US.json
+@@ -0,0 +1,184 @@
++{
++  "interactionModel": {
++    "languageModel": {
++      "invocationName": "nuvio tv",
++      "intents": [
++        {
++          "name": "AMAZON.CancelIntent",
++          "samples": []
++        },
++        {
++          "name": "AMAZON.HelpIntent",
++          "samples": []
++        },
++        {
++          "name": "AMAZON.StopIntent",
++          "samples": []
++        },
++        {
++          "name": "AMAZON.NavigateHomeIntent",
++          "samples": []
++        },
++        {
++          "name": "AMAZON.FallbackIntent",
++          "samples": []
++        },
++        {
++          "name": "PausaIntent",
++          "slots": [],
++          "samples": [
++            "pause",
++            "pause it",
++            "pause the video",
++            "pause the show",
++            "pause the movie",
++            "hold on",
++            "put it on pause"
++          ]
++        },
++        {
++          "name": "RiprendiIntent",
++          "slots": [],
++          "samples": [
++            "resume",
++            "resume the video",
++            "resume playback",
++            "play",
++            "continue",
++            "unpause",
++            "keep playing",
++            "carry on",
++            "start playing again"
++          ]
++        },
++        {
++          "name": "AvantiIntent",
++          "slots": [
++            {
++              "name": "durata",
++              "type": "AMAZON.DURATION"
++            }
++          ],
++          "samples": [
++            "skip forward",
++            "go forward",
++            "fast forward",
++            "skip ahead",
++            "skip forward {durata}",
++            "skip ahead {durata}",
++            "go forward {durata}",
++            "fast forward {durata}",
++            "jump ahead {durata}",
++            "forward {durata}",
++            "skip forward by {durata}",
++            "go forward by {durata}"
++          ]
++        },
++        {
++          "name": "IndietroIntent",
++          "slots": [
++            {
++              "name": "durata",
++              "type": "AMAZON.DURATION"
++            }
++          ],
++          "samples": [
++            "go back",
++            "rewind",
++            "skip back",
++            "go back {durata}",
++            "rewind {durata}",
++            "skip back {durata}",
++            "jump back {durata}",
++            "back {durata}",
++            "go back by {durata}",
++            "rewind by {durata}"
++          ]
++        },
++        {
++          "name": "VaiAlMinutoIntent",
++          "slots": [
++            {
++              "name": "minuti",
++              "type": "AMAZON.NUMBER"
++            },
++            {
++              "name": "ore",
++              "type": "AMAZON.NUMBER"
++            }
++          ],
++          "samples": [
++            "go to minute {minuti}",
++            "jump to minute {minuti}",
++            "skip to minute {minuti}",
++            "take me to minute {minuti}",
++            "start from minute {minuti}",
++            "go to {ore} hour {minuti} minutes",
++            "go to {ore} hours {minuti} minutes",
++            "go to {ore} hour and {minuti} minutes",
++            "go to {ore} hours and {minuti} minutes",
++            "jump to {ore} hour {minuti} minutes",
++            "jump to {ore} hours {minuti} minutes"
++          ]
++        },
++        {
++          "name": "ProssimoEpisodioIntent",
++          "slots": [],
++          "samples": [
++            "next episode",
++            "the next episode",
++            "play the next episode",
++            "play next episode",
++            "go to the next episode",
++            "skip to the next episode",
++            "next"
++          ]
++        },
++        {
++          "name": "SaltaIntroIntent",
++          "slots": [],
++          "samples": [
++            "skip intro",
++            "skip the intro",
++            "skip the opening",
++            "skip the recap",
++            "skip the credits",
++            "skip the opening credits",
++            "skip the theme song"
++          ]
++        },
++        {
++          "name": "ChiudiVideoIntent",
++          "slots": [],
++          "samples": [
++            "close the video",
++            "close the player",
++            "exit the video",
++            "exit the player",
++            "quit the video",
++            "end playback",
++            "stop the video"
++          ]
++        },
++        {
++          "name": "CercaIntent",
++          "slots": [
++            {
++              "name": "titolo",
++              "type": "AMAZON.SearchQuery"
++            }
++          ],
++          "samples": [
++            "search for {titolo}",
++            "search {titolo}",
++            "find {titolo}",
++            "look for {titolo}",
++            "look up {titolo}",
++            "show me {titolo}"
++          ]
++        }
++      ],
++      "types": []
++    }
++  }
++}
+-- 
+2.43.0
+
+
+From 433fe0df550750fc1f018df9983f76041f79b2a1 Mon Sep 17 00:00:00 2001
+From: Fabrizio Catitti <fabrizio.catitti@gmail.com>
+Date: Sat, 24 Oct 2026 13:23:40 +0200
+Subject: [PATCH 3/6] chore(voice): log each relay step and handle relay errors
+
+Logs skill-id mismatches, the mapped command and the TV reply so
+`wrangler tail` shows where a request stops; relay failures now produce
+a spoken error instead of an invalid response.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JQ7oit84w6xrrRhN57hYZw
+---
+ alexa/relay-worker/src/index.ts | 22 ++++++++++++++++------
+ 1 file changed, 16 insertions(+), 6 deletions(-)
+
+diff --git a/alexa/relay-worker/src/index.ts b/alexa/relay-worker/src/index.ts
+index b67af9f..ccfb703 100644
+--- a/alexa/relay-worker/src/index.ts
++++ b/alexa/relay-worker/src/index.ts
+@@ -51,18 +51,28 @@ async function handleAlexa(request: Request, env: Env): Promise<Response> {
+   const appId: string | undefined =
+     envelope?.context?.System?.application?.applicationId ?? envelope?.session?.application?.applicationId;
+   if (!env.ALEXA_SKILL_ID || appId !== env.ALEXA_SKILL_ID) {
++    console.warn(`rejected alexa request: skill id mismatch (got ${appId ?? "none"}, expected ${env.ALEXA_SKILL_ID || "unset"})`);
+     return new Response("forbidden", { status: 403 });
+   }
+ 
++  const lang = langOf(envelope.request?.locale);
+   const outcome = mapRequest(envelope.request ?? { type: "" });
++  console.log(`alexa ${envelope.request?.type} ${envelope.request?.intent?.name ?? ""} -> ${outcome.kind === "command" ? JSON.stringify(outcome.command) : "reply"}`);
+   if (outcome.kind === "reply") return Response.json(outcome.response);
+ 
+-  const res = await relay(env).fetch("https://relay/command", {
+-    method: "POST",
+-    body: JSON.stringify(outcome.command),
+-  });
+-  const reply = (await res.json()) as TvReply;
+-  return Response.json(say(speakResult(outcome.command, reply, langOf(envelope.request?.locale))));
++  let reply: TvReply;
++  try {
++    const res = await relay(env).fetch("https://relay/command", {
++      method: "POST",
++      body: JSON.stringify(outcome.command),
++    });
++    reply = (await res.json()) as TvReply;
++  } catch (e) {
++    console.error("relay error:", e instanceof Error ? e.message : String(e));
++    reply = { ok: false, code: "error" };
++  }
++  console.log(`tv reply: ${JSON.stringify(reply)}`);
++  return Response.json(say(speakResult(outcome.command, reply, lang)));
+ }
+ 
+ async function handleTv(request: Request, env: Env): Promise<Response> {
+-- 
+2.43.0
+
+
+From c77de351ca9976df08a1b5400adea6d62f0e0317 Mon Sep 17 00:00:00 2001
+From: Fabrizio Catitti <fabrizio.catitti@gmail.com>
+Date: Sat, 24 Oct 2026 14:13:29 +0200
+Subject: [PATCH 4/6] feat(voice): "play <title>" voice command
+
+- VoiceTitleResolver searches the installed addons' searchable movie/series
+  catalogs and ranks exact name matches first
+- VoicePlayCoordinator: precheck (refused while the player is on screen),
+  resolve, then open Detail with playOnLoad, which resumes series from
+  watch progress and lets the sources screen apply the auto-play setting;
+  no match falls back to the Search screen
+- Relay: GuardaIntent, 7 s TV timeout for play, title in replies
+- Skill models: GuardaIntent samples (it/en); invocation name "home tv"
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JQ7oit84w6xrrRhN57hYZw
+---
+ alexa/README.md                               |  15 +-
+ alexa/relay-worker/src/index.ts               |  12 +-
+ alexa/relay-worker/src/intents.ts             |  35 ++++-
+ alexa/skill/interaction-model.en-GB.json      |  22 ++-
+ alexa/skill/interaction-model.en-US.json      |  22 ++-
+ alexa/skill/interaction-model.it-IT.json      |  27 +++-
+ .../main/java/com/nuvio/tv/MainActivity.kt    |  25 ++++
+ .../com/nuvio/tv/core/voice/VoiceCommand.kt   |  23 ++-
+ .../nuvio/tv/core/voice/VoiceCommandClient.kt |  10 +-
+ .../tv/core/voice/VoicePlayCoordinator.kt     |  44 ++++++
+ .../nuvio/tv/core/voice/VoiceTitleResolver.kt | 135 ++++++++++++++++++
+ .../ui/screens/player/PlayerVoiceCommands.kt  |   4 +-
+ 12 files changed, 346 insertions(+), 28 deletions(-)
+ create mode 100644 app/src/main/java/com/nuvio/tv/core/voice/VoicePlayCoordinator.kt
+ create mode 100644 app/src/main/java/com/nuvio/tv/core/voice/VoiceTitleResolver.kt
+
+diff --git a/alexa/README.md b/alexa/README.md
+index 9935d30..d007e82 100644
+--- a/alexa/README.md
++++ b/alexa/README.md
+@@ -2,10 +2,10 @@
+ 
+ Control Nuvio on the TV from an Echo while the app is open:
+ 
+-> "Alexa, chiedi a nuvio tv di mettere in pausa"
+-> "Alexa, chiedi a nuvio tv di andare avanti di due minuti"
+-> "Alexa, chiedi a nuvio tv di cercare the bear"
+-> "Alexa, ask nuvio tv to skip forward two minutes"
++> "Alexa, chiedi a home tv di mettere in pausa"
++> "Alexa, chiedi a home tv di andare avanti di due minuti"
++> "Alexa, chiedi a home tv di cercare the bear"
++> "Alexa, ask home tv to skip forward two minutes"
+ 
+ The skill ships Italian (it-IT) and English (en-US, en-GB) models, and Alexa answers in the
+ language of the request. **The Echo's language setting decides which model is used**
+@@ -23,7 +23,7 @@ or with the app in the background.
+ 
+ ## Commands
+ 
+-| Say (after "chiedi a nuvio tv di…") | Does |
++| Say (after "chiedi a home tv di…") | Does |
+ |---|---|
+ | mettere in pausa / riprendere | pause / resume |
+ | andare avanti di 30 secondi · tornare indietro di 2 minuti | seek by (defaults are +30 s and −10 s) |
+@@ -31,13 +31,14 @@ or with the app in the background.
+ | mettere il prossimo episodio | next episode (series) |
+ | saltare l'intro / la sigla / il riassunto | skip the active intro or recap |
+ | chiudere il video | exit the player |
++| guardare *titolo* · riprodurre *titolo* · fammi vedere *titolo* | find the title and start it: series resume where you left off; sources follow your Stream auto-play setting (Manual = you pick) |
+ | cercare *titolo* | open Search with the query (only when no video is playing) |
+ 
+-English, after "ask nuvio tv to…": pause · resume · skip forward 30 seconds · go back 2 minutes ·
++English, after "ask home tv to…": play *title* · watch *title* · pause · resume · skip forward 30 seconds · go back 2 minutes ·
+ go to minute 20 · go to 1 hour and 5 minutes · play the next episode · skip the intro / recap ·
+ close the video · search for *title*.
+ 
+-You can also say "Alexa, apri nuvio tv" (or "Alexa, open nuvio tv") and then give the command
++You can also say "Alexa, apri home tv" (or "Alexa, open home tv") and then give the command
+ without the prefix.
+ 
+ ## 1. Deploy the relay (Cloudflare Workers, Free plan is enough)
+diff --git a/alexa/relay-worker/src/index.ts b/alexa/relay-worker/src/index.ts
+index ccfb703..04cd3f8 100644
+--- a/alexa/relay-worker/src/index.ts
++++ b/alexa/relay-worker/src/index.ts
+@@ -18,6 +18,8 @@ export interface Env {
+ }
+ 
+ const TV_REPLY_TIMEOUT_MS = 4_000;
++// "play" makes the TV search the addon catalogs first; Alexa allows ~8 s per request.
++const TV_PLAY_TIMEOUT_MS = 7_000;
+ 
+ async function constantTimeEquals(a: string, b: string): Promise<boolean> {
+   const enc = new TextEncoder();
+@@ -134,7 +136,7 @@ export class TvRelay implements DurableObject {
+         this.pending.set(id, resolve);
+         setTimeout(() => {
+           if (this.pending.delete(id)) resolve({ ok: false, code: "timeout" });
+-        }, TV_REPLY_TIMEOUT_MS);
++        }, command.cmd === "play" ? TV_PLAY_TIMEOUT_MS : TV_REPLY_TIMEOUT_MS);
+       });
+       try {
+         socket.send(JSON.stringify({ id, ...command }));
+@@ -150,7 +152,7 @@ export class TvRelay implements DurableObject {
+ 
+   async webSocketMessage(_ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+     if (typeof message !== "string") return;
+-    let parsed: { id?: unknown; ok?: unknown; code?: unknown };
++    let parsed: { id?: unknown; ok?: unknown; code?: unknown; title?: unknown };
+     try {
+       parsed = JSON.parse(message);
+     } catch {
+@@ -160,7 +162,11 @@ export class TvRelay implements DurableObject {
+     const resolve = this.pending.get(parsed.id);
+     if (!resolve) return;
+     this.pending.delete(parsed.id);
+-    resolve({ ok: parsed.ok === true, code: String(parsed.code ?? "") });
++    resolve({
++      ok: parsed.ok === true,
++      code: String(parsed.code ?? ""),
++      ...(typeof parsed.title === "string" && parsed.title ? { title: parsed.title } : {}),
++    });
+   }
+ 
+   async webSocketClose(ws: WebSocket, code: number, reason: string): Promise<void> {
+diff --git a/alexa/relay-worker/src/intents.ts b/alexa/relay-worker/src/intents.ts
+index 2260b21..7bb1fa6 100644
+--- a/alexa/relay-worker/src/intents.ts
++++ b/alexa/relay-worker/src/intents.ts
+@@ -13,11 +13,14 @@ export type TvCommand =
+   | { cmd: "next_episode" }
+   | { cmd: "skip_intro" }
+   | { cmd: "stop" }
+-  | { cmd: "search"; query: string };
++  | { cmd: "search"; query: string }
++  | { cmd: "play"; query: string };
+ 
+ export interface TvReply {
+   ok: boolean;
+   code: string;
++  /** For "play": the name of the title the TV opened. */
++  title?: string;
+ }
+ 
+ export interface AlexaResponse {
+@@ -50,8 +53,9 @@ const UNITS: Record<Lang, { h: [string, string]; m: [string, string]; s: [string
+ const T = {
+   it: {
+     help:
+-      "Puoi dire: metti in pausa, riprendi, vai avanti di trenta secondi, torna indietro di un minuto, " +
+-      "vai al minuto venti, prossimo episodio, salta l'intro, chiudi il video, oppure cerca seguito da un titolo.",
++      "Puoi dire: guarda seguito da un titolo, metti in pausa, riprendi, vai avanti di trenta secondi, " +
++      "torna indietro di un minuto, vai al minuto venti, prossimo episodio, salta l'intro, chiudi il video, " +
++      "oppure cerca seguito da un titolo.",
+     ready: "Nuvio è pronto.",
+     whatNext: "Cosa vuoi fare?",
+     didntUnderstand: "Non ho capito.",
+@@ -60,6 +64,8 @@ const T = {
+     askMinuteReprompt: "Dimmi il minuto, per esempio vai al minuto venti.",
+     askQuery: "Cosa vuoi cercare?",
+     askQueryReprompt: "Dimmi il titolo da cercare.",
++    askPlay: "Cosa vuoi guardare?",
++    askPlayReprompt: "Dimmi il titolo, per esempio guarda The Bear.",
+     done: "Fatto.",
+     failed: "Non ci sono riuscita.",
+     codes: {
+@@ -75,12 +81,14 @@ const T = {
+       skipped_intro: "Saltata.",
+       no_intro: "Adesso non c'è niente da saltare.",
+       stopped: "Video chiuso.",
+-      stop_playback_first: "Prima chiudi il video, poi chiedimi di cercare.",
++      stop_playback_first: "Prima chiudi il video, poi chiedimelo di nuovo.",
+       nothing_playing: "Non c'è niente in riproduzione.",
+       not_ready: "Nuvio non è ancora pronto.",
+       tv_offline: "Nuvio non è aperto sulla TV, oppure non è connesso.",
+       timeout: "La TV non ha risposto.",
+     } as Record<string, string>,
++    playing: (title: string) => `Avvio ${title}.`,
++    notFound: (q: string) => `Non ho trovato ${q}, ti mostro i risultati della ricerca.`,
+     forward: (d: string) => `Avanti di ${d}.`,
+     back: (d: string) => `Indietro di ${d}.`,
+     toMinute: (m: number) => `Vado al minuto ${m}.`,
+@@ -89,8 +97,8 @@ const T = {
+   },
+   en: {
+     help:
+-      "You can say: pause, resume, skip forward thirty seconds, go back one minute, go to minute twenty, " +
+-      "next episode, skip the intro, close the video, or search for followed by a title.",
++      "You can say: play followed by a title, pause, resume, skip forward thirty seconds, go back one minute, " +
++      "go to minute twenty, next episode, skip the intro, close the video, or search for followed by a title.",
+     ready: "Nuvio is ready.",
+     whatNext: "What would you like to do?",
+     didntUnderstand: "Sorry, I didn't get that.",
+@@ -99,6 +107,8 @@ const T = {
+     askMinuteReprompt: "Tell me the minute, for example go to minute twenty.",
+     askQuery: "What do you want to search for?",
+     askQueryReprompt: "Tell me the title to search for.",
++    askPlay: "What do you want to watch?",
++    askPlayReprompt: "Tell me the title, for example play The Bear.",
+     done: "Done.",
+     failed: "Sorry, I couldn't do that.",
+     codes: {
+@@ -114,12 +124,14 @@ const T = {
+       skipped_intro: "Skipped.",
+       no_intro: "There's nothing to skip right now.",
+       stopped: "Video closed.",
+-      stop_playback_first: "Close the video first, then ask me to search.",
++      stop_playback_first: "Close the video first, then ask me again.",
+       nothing_playing: "Nothing is playing.",
+       not_ready: "Nuvio isn't ready yet.",
+       tv_offline: "Nuvio isn't open on the TV, or it isn't connected.",
+       timeout: "The TV didn't respond.",
+     } as Record<string, string>,
++    playing: (title: string) => `Starting ${title}.`,
++    notFound: (q: string) => `I couldn't find ${q}, so I've opened the search results.`,
+     forward: (d: string) => `Skipped forward ${d}.`,
+     back: (d: string) => `Went back ${d}.`,
+     toMinute: (m: number) => `Going to minute ${m}.`,
+@@ -221,6 +233,11 @@ export function mapRequest(request: {
+       if (!query) return reply(say(t.askQuery, false, t.askQueryReprompt));
+       return cmd({ cmd: "search", query });
+     }
++    case "GuardaIntent": {
++      const query = slots.titolo?.value?.trim();
++      if (!query) return reply(say(t.askPlay, false, t.askPlayReprompt));
++      return cmd({ cmd: "play", query });
++    }
+     case "AMAZON.HelpIntent":
+       return reply(say(t.help, false, t.whatNext));
+     case "AMAZON.StopIntent":
+@@ -247,6 +264,10 @@ export function speakResult(command: TvCommand, result: TvReply, lang: Lang = "i
+       return t.toTime(speakDuration(command.ms, lang));
+     case "searching":
+       return command.cmd === "search" ? t.searching(command.query) : t.done;
++    case "playing":
++      return t.playing(result.title || (command.cmd === "play" ? command.query : ""));
++    case "not_found_searching":
++      return command.cmd === "play" ? t.notFound(command.query) : t.done;
+     default:
+       return t.codes[result.code] ?? (result.ok ? t.done : t.failed);
+   }
+diff --git a/alexa/skill/interaction-model.en-GB.json b/alexa/skill/interaction-model.en-GB.json
+index af57d8e..2754b0e 100644
+--- a/alexa/skill/interaction-model.en-GB.json
++++ b/alexa/skill/interaction-model.en-GB.json
+@@ -1,7 +1,7 @@
+ {
+   "interactionModel": {
+     "languageModel": {
+-      "invocationName": "nuvio tv",
++      "invocationName": "home tv",
+       "intents": [
+         {
+           "name": "AMAZON.CancelIntent",
+@@ -176,6 +176,26 @@
+             "look up {titolo}",
+             "show me {titolo}"
+           ]
++        },
++        {
++          "name": "GuardaIntent",
++          "slots": [
++            {
++              "name": "titolo",
++              "type": "AMAZON.SearchQuery"
++            }
++          ],
++          "samples": [
++            "play {titolo}",
++            "watch {titolo}",
++            "put on {titolo}",
++            "start {titolo}",
++            "start watching {titolo}",
++            "i want to watch {titolo}",
++            "let me watch {titolo}",
++            "continue watching {titolo}",
++            "keep watching {titolo}"
++          ]
+         }
+       ],
+       "types": []
+diff --git a/alexa/skill/interaction-model.en-US.json b/alexa/skill/interaction-model.en-US.json
+index af57d8e..2754b0e 100644
+--- a/alexa/skill/interaction-model.en-US.json
++++ b/alexa/skill/interaction-model.en-US.json
+@@ -1,7 +1,7 @@
+ {
+   "interactionModel": {
+     "languageModel": {
+-      "invocationName": "nuvio tv",
++      "invocationName": "home tv",
+       "intents": [
+         {
+           "name": "AMAZON.CancelIntent",
+@@ -176,6 +176,26 @@
+             "look up {titolo}",
+             "show me {titolo}"
+           ]
++        },
++        {
++          "name": "GuardaIntent",
++          "slots": [
++            {
++              "name": "titolo",
++              "type": "AMAZON.SearchQuery"
++            }
++          ],
++          "samples": [
++            "play {titolo}",
++            "watch {titolo}",
++            "put on {titolo}",
++            "start {titolo}",
++            "start watching {titolo}",
++            "i want to watch {titolo}",
++            "let me watch {titolo}",
++            "continue watching {titolo}",
++            "keep watching {titolo}"
++          ]
+         }
+       ],
+       "types": []
+diff --git a/alexa/skill/interaction-model.it-IT.json b/alexa/skill/interaction-model.it-IT.json
+index 716884d..858c161 100644
+--- a/alexa/skill/interaction-model.it-IT.json
++++ b/alexa/skill/interaction-model.it-IT.json
+@@ -1,7 +1,7 @@
+ {
+   "interactionModel": {
+     "languageModel": {
+-      "invocationName": "nuvio tv",
++      "invocationName": "home tv",
+       "intents": [
+         {
+           "name": "AMAZON.CancelIntent",
+@@ -198,6 +198,31 @@
+             "fai una ricerca di {titolo}",
+             "fare una ricerca di {titolo}"
+           ]
++        },
++        {
++          "name": "GuardaIntent",
++          "slots": [
++            {
++              "name": "titolo",
++              "type": "AMAZON.SearchQuery"
++            }
++          ],
++          "samples": [
++            "guarda {titolo}",
++            "guardare {titolo}",
++            "riproduci {titolo}",
++            "riprodurre {titolo}",
++            "fammi vedere {titolo}",
++            "farmi vedere {titolo}",
++            "voglio vedere {titolo}",
++            "voglio guardare {titolo}",
++            "avvia {titolo}",
++            "avviare {titolo}",
++            "metti su {titolo}",
++            "mettere su {titolo}",
++            "continua a guardare {titolo}",
++            "continuare a guardare {titolo}"
++          ]
+         }
+       ],
+       "types": []
+diff --git a/app/src/main/java/com/nuvio/tv/MainActivity.kt b/app/src/main/java/com/nuvio/tv/MainActivity.kt
+index 635fc80..f0eb7cd 100644
+--- a/app/src/main/java/com/nuvio/tv/MainActivity.kt
++++ b/app/src/main/java/com/nuvio/tv/MainActivity.kt
+@@ -1011,6 +1011,31 @@ open class MainActivity : ComponentActivity() {
+                                         com.nuvio.tv.core.voice.VoiceResult.ok("searching")
+                                     }
+                                 }
++                                // Precheck for "play <title>": the coordinator resolves the
++                                // title only once a screen has agreed it can be opened.
++                                is com.nuvio.tv.core.voice.VoiceCommand.Play -> {
++                                    if (!layoutChosen) {
++                                        com.nuvio.tv.core.voice.VoiceResult.fail("not_ready")
++                                    } else {
++                                        com.nuvio.tv.core.voice.VoiceResult.ok("ready")
++                                    }
++                                }
++                                is com.nuvio.tv.core.voice.VoiceCommand.OpenTitle -> {
++                                    // Same path as "play" from post-play recommendations: the
++                                    // details screen picks the next episode to watch and hands
++                                    // off to the sources screen, which applies auto-play.
++                                    navController.navigate(
++                                        Screen.Detail.createRoute(
++                                            itemId = command.id,
++                                            itemType = command.type,
++                                            addonBaseUrl = command.addonBaseUrl,
++                                            playOnLoad = true
++                                        )
++                                    ) {
++                                        launchSingleTop = true
++                                    }
++                                    com.nuvio.tv.core.voice.VoiceResult.ok("playing")
++                                }
+                                 else -> com.nuvio.tv.core.voice.VoiceResult.fail("nothing_playing")
+                             }
+                         }
+diff --git a/app/src/main/java/com/nuvio/tv/core/voice/VoiceCommand.kt b/app/src/main/java/com/nuvio/tv/core/voice/VoiceCommand.kt
+index 1405447..ad48889 100644
+--- a/app/src/main/java/com/nuvio/tv/core/voice/VoiceCommand.kt
++++ b/app/src/main/java/com/nuvio/tv/core/voice/VoiceCommand.kt
+@@ -9,8 +9,10 @@ import org.json.JSONObject
+  *   {"id":"<uuid>","cmd":"pause"}
+  *   {"id":"<uuid>","cmd":"seek_by","ms":-30000}
+  *   {"id":"<uuid>","cmd":"search","query":"the bear"}
++ *   {"id":"<uuid>","cmd":"play","query":"the bear"}
+  *
+  * Reply (TV -> relay): {"id":"<uuid>","ok":true,"code":"paused"}
++ * ("play" replies also carry "title": the name of the title that was opened.)
+  */
+ sealed interface VoiceCommand {
+     data object Pause : VoiceCommand
+@@ -22,6 +24,20 @@ sealed interface VoiceCommand {
+     data object Stop : VoiceCommand
+     data class Search(val query: String) : VoiceCommand
+ 
++    /** Find a title by name and start it (series resume from watch progress). */
++    data class Play(val query: String) : VoiceCommand
++
++    /**
++     * Internal, never on the wire: produced by [VoicePlayCoordinator] once [Play] has been
++     * resolved to a catalog item. The app-level handler opens it with play-on-load.
++     */
++    data class OpenTitle(
++        val id: String,
++        val type: String,
++        val name: String,
++        val addonBaseUrl: String?,
++    ) : VoiceCommand
++
+     companion object {
+         fun fromJson(json: JSONObject): VoiceCommand? = when (json.optString("cmd")) {
+             "pause" -> Pause
+@@ -32,6 +48,7 @@ sealed interface VoiceCommand {
+             "skip_intro" -> SkipIntro
+             "stop" -> Stop
+             "search" -> json.optString("query").trim().takeIf { it.isNotEmpty() }?.let(::Search)
++            "play" -> json.optString("query").trim().takeIf { it.isNotEmpty() }?.let(::Play)
+             else -> null
+         }
+     }
+@@ -39,11 +56,11 @@ sealed interface VoiceCommand {
+ 
+ /**
+  * Outcome of a command. [code] is a stable machine-readable string; the relay maps it to
+- * the spoken Italian reply, so the app never has to localize Alexa responses.
++ * the spoken reply (Italian or English), so the app never has to localize Alexa responses.
+  */
+-data class VoiceResult(val ok: Boolean, val code: String) {
++data class VoiceResult(val ok: Boolean, val code: String, val title: String? = null) {
+     companion object {
+-        fun ok(code: String) = VoiceResult(true, code)
++        fun ok(code: String, title: String? = null) = VoiceResult(true, code, title)
+         fun fail(code: String) = VoiceResult(false, code)
+     }
+ }
+diff --git a/app/src/main/java/com/nuvio/tv/core/voice/VoiceCommandClient.kt b/app/src/main/java/com/nuvio/tv/core/voice/VoiceCommandClient.kt
+index 9117b73..07c87b2 100644
+--- a/app/src/main/java/com/nuvio/tv/core/voice/VoiceCommandClient.kt
++++ b/app/src/main/java/com/nuvio/tv/core/voice/VoiceCommandClient.kt
+@@ -29,6 +29,7 @@ import javax.inject.Singleton
+ class VoiceCommandClient @Inject constructor(
+     baseClient: OkHttpClient,
+     private val bus: VoiceCommandBus,
++    private val playCoordinator: VoicePlayCoordinator,
+ ) {
+     private val client: OkHttpClient = baseClient.newBuilder()
+         .cache(null)
+@@ -98,16 +99,17 @@ class VoiceCommandClient @Inject constructor(
+             val id = json.optString("id").takeIf { it.isNotEmpty() } ?: return
+             scope.launch {
+                 val command = VoiceCommand.fromJson(json)
+-                val result = if (command == null) {
+-                    VoiceResult.fail("unknown_command")
+-                } else {
+-                    bus.dispatch(command)
++                val result = when (command) {
++                    null, is VoiceCommand.OpenTitle -> VoiceResult.fail("unknown_command")
++                    is VoiceCommand.Play -> playCoordinator.play(command.query)
++                    else -> bus.dispatch(command)
+                 }
+                 Log.d(TAG, "command=$command result=$result")
+                 val reply = JSONObject()
+                     .put("id", id)
+                     .put("ok", result.ok)
+                     .put("code", result.code)
++                result.title?.let { reply.put("title", it) }
+                 webSocket.send(reply.toString())
+             }
+         }
+diff --git a/app/src/main/java/com/nuvio/tv/core/voice/VoicePlayCoordinator.kt b/app/src/main/java/com/nuvio/tv/core/voice/VoicePlayCoordinator.kt
+new file mode 100644
+index 0000000..292545f
+--- /dev/null
++++ b/app/src/main/java/com/nuvio/tv/core/voice/VoicePlayCoordinator.kt
+@@ -0,0 +1,44 @@
++package com.nuvio.tv.core.voice
++
++import android.util.Log
++import kotlinx.coroutines.withTimeoutOrNull
++import javax.inject.Inject
++import javax.inject.Singleton
++
++/**
++ * "Play <title>" in three steps:
++ *  1. ask the screens whether a title may be opened right now (the player refuses while a
++ *     video is on screen, the app refuses before onboarding is done);
++ *  2. resolve the spoken title against the addon catalogs;
++ *  3. open it with play-on-load (series resume from watch progress, sources follow the user's
++ *     stream auto-play setting). No confident match falls back to the Search screen.
++ */
++@Singleton
++class VoicePlayCoordinator @Inject constructor(
++    private val bus: VoiceCommandBus,
++    private val resolver: VoiceTitleResolver,
++) {
++    suspend fun play(query: String): VoiceResult {
++        val precheck = bus.dispatch(VoiceCommand.Play(query))
++        if (!precheck.ok) return precheck
++
++        val match = runCatching { withTimeoutOrNull(RESOLVE_TIMEOUT_MS) { resolver.resolve(query) } }
++            .onFailure { Log.w(TAG, "title lookup failed for '$query'", it) }
++            .getOrNull()
++
++        if (match == null) {
++            val search = bus.dispatch(VoiceCommand.Search(query))
++            return if (search.ok) VoiceResult.fail("not_found_searching") else search
++        }
++
++        val opened = bus.dispatch(match)
++        return if (opened.ok) opened.copy(title = match.name) else opened
++    }
++
++    private companion object {
++        const val TAG = "VoicePlayCoordinator"
++
++        // The relay waits ~7 s for the TV and Alexa allows ~8 s overall.
++        const val RESOLVE_TIMEOUT_MS = 5_000L
++    }
++}
+diff --git a/app/src/main/java/com/nuvio/tv/core/voice/VoiceTitleResolver.kt b/app/src/main/java/com/nuvio/tv/core/voice/VoiceTitleResolver.kt
+new file mode 100644
+index 0000000..a413f6e
+--- /dev/null
++++ b/app/src/main/java/com/nuvio/tv/core/voice/VoiceTitleResolver.kt
+@@ -0,0 +1,135 @@
++package com.nuvio.tv.core.voice
++
++import com.nuvio.tv.core.network.NetworkResult
++import com.nuvio.tv.domain.model.Addon
++import com.nuvio.tv.domain.model.CatalogDescriptor
++import com.nuvio.tv.domain.model.ContentType
++import com.nuvio.tv.domain.model.enabledAddons
++import com.nuvio.tv.domain.model.supportsExtra
++import com.nuvio.tv.domain.repository.AddonRepository
++import com.nuvio.tv.domain.repository.CatalogRepository
++import kotlinx.coroutines.async
++import kotlinx.coroutines.awaitAll
++import kotlinx.coroutines.coroutineScope
++import kotlinx.coroutines.flow.first
++import kotlinx.coroutines.withTimeoutOrNull
++import java.text.Normalizer
++import javax.inject.Inject
++import javax.inject.Singleton
++
++/**
++ * Turns a spoken title ("the bear") into a catalog item, using the same searchable
++ * movie/series catalogs of the installed addons that the Search screen queries.
++ *
++ * Ranking: an exact (normalised) name match wins ("the bear" prefers "The Bear" over "Bear"),
++ * then a match ignoring a leading article, then names starting with / containing the query;
++ * ties go to the addon order (as installed) and then the addon's own result order.
++ */
++@Singleton
++class VoiceTitleResolver @Inject constructor(
++    private val addonRepository: AddonRepository,
++    private val catalogRepository: CatalogRepository,
++) {
++
++    suspend fun resolve(query: String): VoiceCommand.OpenTitle? = coroutineScope {
++        val wanted = normalize(query)
++        if (wanted.isEmpty() || stripArticle(wanted).isEmpty()) return@coroutineScope null
++
++        val addons = addonRepository.getInstalledAddons().first().enabledAddons()
++        val targets = searchTargets(addons)
++
++        val rows = targets.mapIndexed { index, (addon, catalog) ->
++            async {
++                val result = withTimeoutOrNull(PER_CATALOG_TIMEOUT_MS) {
++                    catalogRepository.getCatalog(
++                        addonBaseUrl = addon.baseUrl,
++                        addonId = addon.id,
++                        addonName = addon.displayName,
++                        catalogId = catalog.id,
++                        catalogName = catalog.name,
++                        type = catalog.apiType,
++                        extraArgs = mapOf("search" to query),
++                    ).first { it !is NetworkResult.Loading }
++                }
++                (result as? NetworkResult.Success)?.data?.let { index to it }
++            }
++        }.awaitAll().filterNotNull()
++
++        rows.flatMap { (catalogIndex, row) ->
++            row.items.take(MAX_ITEMS_PER_CATALOG).mapIndexed { rank, item ->
++                Candidate(
++                    score = score(wanted, normalize(item.name)),
++                    catalogIndex = catalogIndex,
++                    rank = rank,
++                    title = VoiceCommand.OpenTitle(
++                        id = item.id,
++                        type = item.apiType,
++                        name = item.name,
++                        addonBaseUrl = row.addonBaseUrl,
++                    ),
++                )
++            }
++        }
++            .filter { it.score > 0 }
++            .sortedWith(
++                compareByDescending<Candidate> { it.score }
++                    .thenBy { it.catalogIndex }
++                    .thenBy { it.rank }
++            )
++            .firstOrNull()
++            ?.title
++    }
++
++    private data class Candidate(
++        val score: Int,
++        val catalogIndex: Int,
++        val rank: Int,
++        val title: VoiceCommand.OpenTitle,
++    )
++
++    private fun searchTargets(addons: List<Addon>): List<Pair<Addon, CatalogDescriptor>> =
++        addons.flatMap { addon ->
++            addon.catalogs
++                .filter { it.type == ContentType.MOVIE || it.type == ContentType.SERIES }
++                .filter { it.isSearchableWithQueryOnly() }
++                .map { addon to it }
++        }
++
++    // Same rule as SearchViewModel: only catalogs that need nothing but the search term.
++    private fun CatalogDescriptor.isSearchableWithQueryOnly(): Boolean =
++        supportsExtra("search") &&
++            extra.none { it.isRequired && !it.name.equals("search", ignoreCase = true) }
++
++    internal companion object {
++        const val PER_CATALOG_TIMEOUT_MS = 4_000L
++        const val MAX_ITEMS_PER_CATALOG = 10
++
++        private val LEADING_ARTICLE = Regex("^(the|a|an|il|lo|la|i|gli|le|l|un|uno|una)\\s+")
++
++        /** Lower-case, strip accents and punctuation, collapse spaces. */
++        fun normalize(value: String): String =
++            Normalizer.normalize(value, Normalizer.Form.NFD)
++                .replace(Regex("\\p{M}+"), "")
++                .lowercase()
++                .replace('&', ' ')
++                .replace(Regex("[^a-z0-9]+"), " ")
++                .trim()
++
++        fun stripArticle(normalized: String): String = normalized.replace(LEADING_ARTICLE, "")
++
++        /** Both arguments already [normalize]d. */
++        fun score(wanted: String, candidate: String): Int {
++            if (candidate.isEmpty()) return 0
++            val bareWanted = stripArticle(wanted)
++            val bareCandidate = stripArticle(candidate)
++            return when {
++                candidate == wanted -> 110
++                bareCandidate == bareWanted -> 100
++                bareCandidate.startsWith("$bareWanted ") -> 60
++                bareCandidate.contains(bareWanted) -> 40
++                bareWanted.contains(bareCandidate) -> 30
++                else -> 10 // the addon still ranked it for this query
++            }
++        }
++    }
++}
+diff --git a/app/src/main/java/com/nuvio/tv/ui/screens/player/PlayerVoiceCommands.kt b/app/src/main/java/com/nuvio/tv/ui/screens/player/PlayerVoiceCommands.kt
+index 0489fb5..18ce1cb 100644
+--- a/app/src/main/java/com/nuvio/tv/ui/screens/player/PlayerVoiceCommands.kt
++++ b/app/src/main/java/com/nuvio/tv/ui/screens/player/PlayerVoiceCommands.kt
+@@ -75,6 +75,8 @@ internal fun PlayerViewModel.handleVoiceCommand(
+ 
+         // Navigating away mid-playback would leave the player in a half-released state;
+         // ask the user to stop first instead.
+-        is VoiceCommand.Search -> VoiceResult.fail("stop_playback_first")
++        is VoiceCommand.Search,
++        is VoiceCommand.Play,
++        is VoiceCommand.OpenTitle -> VoiceResult.fail("stop_playback_first")
+     }
+ }
+-- 
+2.43.0
+
+
+From 6536546a50397d757cb41f9b482e07f7b7147d43 Mon Sep 17 00:00:00 2001
+From: Fabrizio Catitti <fabrizio.catitti@gmail.com>
+Date: Sat, 24 Oct 2026 14:31:54 +0200
+Subject: [PATCH 5/6] feat(voice): "play <title>" replaces the video that is
+ playing
+
+While a video is on screen the title is looked up first (playback keeps
+going), then the player exits exactly like pressing Back and the new
+title opens. If nothing matches, the current video keeps playing.
+Detail navigation for voice no longer uses launchSingleTop so another
+title's details screen is never reused.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JQ7oit84w6xrrRhN57hYZw
+---
+ alexa/README.md                                  |  2 +-
+ alexa/relay-worker/src/intents.ts                |  6 +++++-
+ app/src/main/java/com/nuvio/tv/MainActivity.kt   |  7 ++++---
+ .../java/com/nuvio/tv/core/voice/VoiceCommand.kt |  3 +++
+ .../nuvio/tv/core/voice/VoicePlayCoordinator.kt  |  9 ++++++---
+ .../tv/ui/screens/player/PlayerVoiceCommands.kt  | 16 +++++++++++-----
+ 6 files changed, 30 insertions(+), 13 deletions(-)
+
+diff --git a/alexa/README.md b/alexa/README.md
+index d007e82..8bed090 100644
+--- a/alexa/README.md
++++ b/alexa/README.md
+@@ -31,7 +31,7 @@ or with the app in the background.
+ | mettere il prossimo episodio | next episode (series) |
+ | saltare l'intro / la sigla / il riassunto | skip the active intro or recap |
+ | chiudere il video | exit the player |
+-| guardare *titolo* · riprodurre *titolo* · fammi vedere *titolo* | find the title and start it: series resume where you left off; sources follow your Stream auto-play setting (Manual = you pick) |
++| guardare *titolo* · riprodurre *titolo* · fammi vedere *titolo* | find the title and start it (stops the current video first): series resume where you left off; sources follow your Stream auto-play setting (Manual = you pick) |
+ | cercare *titolo* | open Search with the query (only when no video is playing) |
+ 
+ English, after "ask home tv to…": play *title* · watch *title* · pause · resume · skip forward 30 seconds · go back 2 minutes ·
+diff --git a/alexa/relay-worker/src/intents.ts b/alexa/relay-worker/src/intents.ts
+index 7bb1fa6..d46a59e 100644
+--- a/alexa/relay-worker/src/intents.ts
++++ b/alexa/relay-worker/src/intents.ts
+@@ -89,6 +89,7 @@ const T = {
+     } as Record<string, string>,
+     playing: (title: string) => `Avvio ${title}.`,
+     notFound: (q: string) => `Non ho trovato ${q}, ti mostro i risultati della ricerca.`,
++    notFoundKeepPlaying: (q: string) => `Non ho trovato ${q}.`,
+     forward: (d: string) => `Avanti di ${d}.`,
+     back: (d: string) => `Indietro di ${d}.`,
+     toMinute: (m: number) => `Vado al minuto ${m}.`,
+@@ -132,6 +133,7 @@ const T = {
+     } as Record<string, string>,
+     playing: (title: string) => `Starting ${title}.`,
+     notFound: (q: string) => `I couldn't find ${q}, so I've opened the search results.`,
++    notFoundKeepPlaying: (q: string) => `I couldn't find ${q}.`,
+     forward: (d: string) => `Skipped forward ${d}.`,
+     back: (d: string) => `Went back ${d}.`,
+     toMinute: (m: number) => `Going to minute ${m}.`,
+@@ -267,7 +269,9 @@ export function speakResult(command: TvCommand, result: TvReply, lang: Lang = "i
+     case "playing":
+       return t.playing(result.title || (command.cmd === "play" ? command.query : ""));
+     case "not_found_searching":
+-      return command.cmd === "play" ? t.notFound(command.query) : t.done;
++      return command.cmd === "play" ? t.notFound(command.query) : t.failed;
++    case "not_found":
++      return command.cmd === "play" ? t.notFoundKeepPlaying(command.query) : t.failed;
+     default:
+       return t.codes[result.code] ?? (result.ok ? t.done : t.failed);
+   }
+diff --git a/app/src/main/java/com/nuvio/tv/MainActivity.kt b/app/src/main/java/com/nuvio/tv/MainActivity.kt
+index f0eb7cd..ddcf32e 100644
+--- a/app/src/main/java/com/nuvio/tv/MainActivity.kt
++++ b/app/src/main/java/com/nuvio/tv/MainActivity.kt
+@@ -1024,6 +1024,9 @@ open class MainActivity : ComponentActivity() {
+                                     // Same path as "play" from post-play recommendations: the
+                                     // details screen picks the next episode to watch and hands
+                                     // off to the sources screen, which applies auto-play.
++                                    // If a video was playing, the player handler has already
++                                    // exited it. No launchSingleTop: the top entry may be another
++                                    // title's details, which must not be reused.
+                                     navController.navigate(
+                                         Screen.Detail.createRoute(
+                                             itemId = command.id,
+@@ -1031,9 +1034,7 @@ open class MainActivity : ComponentActivity() {
+                                             addonBaseUrl = command.addonBaseUrl,
+                                             playOnLoad = true
+                                         )
+-                                    ) {
+-                                        launchSingleTop = true
+-                                    }
++                                    )
+                                     com.nuvio.tv.core.voice.VoiceResult.ok("playing")
+                                 }
+                                 else -> com.nuvio.tv.core.voice.VoiceResult.fail("nothing_playing")
+diff --git a/app/src/main/java/com/nuvio/tv/core/voice/VoiceCommand.kt b/app/src/main/java/com/nuvio/tv/core/voice/VoiceCommand.kt
+index ad48889..5041206 100644
+--- a/app/src/main/java/com/nuvio/tv/core/voice/VoiceCommand.kt
++++ b/app/src/main/java/com/nuvio/tv/core/voice/VoiceCommand.kt
+@@ -62,5 +62,8 @@ data class VoiceResult(val ok: Boolean, val code: String, val title: String? = n
+     companion object {
+         fun ok(code: String, title: String? = null) = VoiceResult(true, code, title)
+         fun fail(code: String) = VoiceResult(false, code)
++
++        /** Precheck answer for [VoiceCommand.Play] when a video is on screen. */
++        const val PLAY_READY_WHILE_PLAYING = "ready_while_playing"
+     }
+ }
+diff --git a/app/src/main/java/com/nuvio/tv/core/voice/VoicePlayCoordinator.kt b/app/src/main/java/com/nuvio/tv/core/voice/VoicePlayCoordinator.kt
+index 292545f..b052a32 100644
+--- a/app/src/main/java/com/nuvio/tv/core/voice/VoicePlayCoordinator.kt
++++ b/app/src/main/java/com/nuvio/tv/core/voice/VoicePlayCoordinator.kt
+@@ -7,11 +7,12 @@ import javax.inject.Singleton
+ 
+ /**
+  * "Play <title>" in three steps:
+- *  1. ask the screens whether a title may be opened right now (the player refuses while a
+- *     video is on screen, the app refuses before onboarding is done);
++ *  1. ask the screens whether a title may be opened right now (the app refuses before
++ *     onboarding is done; the player answers "ready while playing" and keeps playing);
+  *  2. resolve the spoken title against the addon catalogs;
+  *  3. open it with play-on-load (series resume from watch progress, sources follow the user's
+- *     stream auto-play setting). No confident match falls back to the Search screen.
++ *     stream auto-play setting). If a video is playing, the player exits first.
++ * No match: open the Search screen, or, if a video is playing, leave it playing.
+  */
+ @Singleton
+ class VoicePlayCoordinator @Inject constructor(
+@@ -21,12 +22,14 @@ class VoicePlayCoordinator @Inject constructor(
+     suspend fun play(query: String): VoiceResult {
+         val precheck = bus.dispatch(VoiceCommand.Play(query))
+         if (!precheck.ok) return precheck
++        val videoPlaying = precheck.code == VoiceResult.PLAY_READY_WHILE_PLAYING
+ 
+         val match = runCatching { withTimeoutOrNull(RESOLVE_TIMEOUT_MS) { resolver.resolve(query) } }
+             .onFailure { Log.w(TAG, "title lookup failed for '$query'", it) }
+             .getOrNull()
+ 
+         if (match == null) {
++            if (videoPlaying) return VoiceResult.fail("not_found")
+             val search = bus.dispatch(VoiceCommand.Search(query))
+             return if (search.ok) VoiceResult.fail("not_found_searching") else search
+         }
+diff --git a/app/src/main/java/com/nuvio/tv/ui/screens/player/PlayerVoiceCommands.kt b/app/src/main/java/com/nuvio/tv/ui/screens/player/PlayerVoiceCommands.kt
+index 18ce1cb..a83f1df 100644
+--- a/app/src/main/java/com/nuvio/tv/ui/screens/player/PlayerVoiceCommands.kt
++++ b/app/src/main/java/com/nuvio/tv/ui/screens/player/PlayerVoiceCommands.kt
+@@ -73,10 +73,16 @@ internal fun PlayerViewModel.handleVoiceCommand(
+             VoiceResult.ok("stopped")
+         }
+ 
+-        // Navigating away mid-playback would leave the player in a half-released state;
+-        // ask the user to stop first instead.
+-        is VoiceCommand.Search,
+-        is VoiceCommand.Play,
+-        is VoiceCommand.OpenTitle -> VoiceResult.fail("stop_playback_first")
++        // "Play <title>" while something is playing: keep playing while the title is looked up
++        // (so a failed lookup interrupts nothing), then exit the player exactly like pressing
++        // Back (progress saved, player released) and let the app-level handler open the title.
++        is VoiceCommand.Play -> VoiceResult.ok(VoiceResult.PLAY_READY_WHILE_PLAYING)
++        is VoiceCommand.OpenTitle -> {
++            exitPlayer()
++            null
++        }
++
++        // Search has no "go back to what I was watching" path, so ask the user to stop first.
++        is VoiceCommand.Search -> VoiceResult.fail("stop_playback_first")
+     }
+ }
+-- 
+2.43.0
+
+
+From 3e15a45e35eee0ab83864409d8b421488e1b3080 Mon Sep 17 00:00:00 2001
+From: Fabrizio Catitti <fabrizio.catitti@gmail.com>
+Date: Sat, 24 Oct 2026 14:50:45 +0200
+Subject: [PATCH 6/6] feat(voice): play phrases are "voglio vedere <titolo>"
+ and "play <title>"
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JQ7oit84w6xrrRhN57hYZw
+---
+ alexa/README.md                          |  4 ++--
+ alexa/relay-worker/src/intents.ts        |  4 ++--
+ alexa/skill/interaction-model.en-GB.json | 10 +---------
+ alexa/skill/interaction-model.en-US.json | 10 +---------
+ alexa/skill/interaction-model.it-IT.json | 15 +--------------
+ 5 files changed, 7 insertions(+), 36 deletions(-)
+
+diff --git a/alexa/README.md b/alexa/README.md
+index 8bed090..7b6b3ae 100644
+--- a/alexa/README.md
++++ b/alexa/README.md
+@@ -31,10 +31,10 @@ or with the app in the background.
+ | mettere il prossimo episodio | next episode (series) |
+ | saltare l'intro / la sigla / il riassunto | skip the active intro or recap |
+ | chiudere il video | exit the player |
+-| guardare *titolo* · riprodurre *titolo* · fammi vedere *titolo* | find the title and start it (stops the current video first): series resume where you left off; sources follow your Stream auto-play setting (Manual = you pick) |
++| voglio vedere *titolo* (say it after "Alexa, apri home tv") | find the title and start it (stops the current video first): series resume where you left off; sources follow your Stream auto-play setting (Manual = you pick) |
+ | cercare *titolo* | open Search with the query (only when no video is playing) |
+ 
+-English, after "ask home tv to…": play *title* · watch *title* · pause · resume · skip forward 30 seconds · go back 2 minutes ·
++English, after "ask home tv to…": play *title* · pause · resume · skip forward 30 seconds · go back 2 minutes ·
+ go to minute 20 · go to 1 hour and 5 minutes · play the next episode · skip the intro / recap ·
+ close the video · search for *title*.
+ 
+diff --git a/alexa/relay-worker/src/intents.ts b/alexa/relay-worker/src/intents.ts
+index d46a59e..2ce7fdd 100644
+--- a/alexa/relay-worker/src/intents.ts
++++ b/alexa/relay-worker/src/intents.ts
+@@ -53,7 +53,7 @@ const UNITS: Record<Lang, { h: [string, string]; m: [string, string]; s: [string
+ const T = {
+   it: {
+     help:
+-      "Puoi dire: guarda seguito da un titolo, metti in pausa, riprendi, vai avanti di trenta secondi, " +
++      "Puoi dire: voglio vedere seguito da un titolo, metti in pausa, riprendi, vai avanti di trenta secondi, " +
+       "torna indietro di un minuto, vai al minuto venti, prossimo episodio, salta l'intro, chiudi il video, " +
+       "oppure cerca seguito da un titolo.",
+     ready: "Nuvio è pronto.",
+@@ -65,7 +65,7 @@ const T = {
+     askQuery: "Cosa vuoi cercare?",
+     askQueryReprompt: "Dimmi il titolo da cercare.",
+     askPlay: "Cosa vuoi guardare?",
+-    askPlayReprompt: "Dimmi il titolo, per esempio guarda The Bear.",
++    askPlayReprompt: "Dimmi il titolo, per esempio voglio vedere The Bear.",
+     done: "Fatto.",
+     failed: "Non ci sono riuscita.",
+     codes: {
+diff --git a/alexa/skill/interaction-model.en-GB.json b/alexa/skill/interaction-model.en-GB.json
+index 2754b0e..fde5459 100644
+--- a/alexa/skill/interaction-model.en-GB.json
++++ b/alexa/skill/interaction-model.en-GB.json
+@@ -186,15 +186,7 @@
+             }
+           ],
+           "samples": [
+-            "play {titolo}",
+-            "watch {titolo}",
+-            "put on {titolo}",
+-            "start {titolo}",
+-            "start watching {titolo}",
+-            "i want to watch {titolo}",
+-            "let me watch {titolo}",
+-            "continue watching {titolo}",
+-            "keep watching {titolo}"
++            "play {titolo}"
+           ]
+         }
+       ],
+diff --git a/alexa/skill/interaction-model.en-US.json b/alexa/skill/interaction-model.en-US.json
+index 2754b0e..fde5459 100644
+--- a/alexa/skill/interaction-model.en-US.json
++++ b/alexa/skill/interaction-model.en-US.json
+@@ -186,15 +186,7 @@
+             }
+           ],
+           "samples": [
+-            "play {titolo}",
+-            "watch {titolo}",
+-            "put on {titolo}",
+-            "start {titolo}",
+-            "start watching {titolo}",
+-            "i want to watch {titolo}",
+-            "let me watch {titolo}",
+-            "continue watching {titolo}",
+-            "keep watching {titolo}"
++            "play {titolo}"
+           ]
+         }
+       ],
+diff --git a/alexa/skill/interaction-model.it-IT.json b/alexa/skill/interaction-model.it-IT.json
+index 858c161..46b1506 100644
+--- a/alexa/skill/interaction-model.it-IT.json
++++ b/alexa/skill/interaction-model.it-IT.json
+@@ -208,20 +208,7 @@
+             }
+           ],
+           "samples": [
+-            "guarda {titolo}",
+-            "guardare {titolo}",
+-            "riproduci {titolo}",
+-            "riprodurre {titolo}",
+-            "fammi vedere {titolo}",
+-            "farmi vedere {titolo}",
+-            "voglio vedere {titolo}",
+-            "voglio guardare {titolo}",
+-            "avvia {titolo}",
+-            "avviare {titolo}",
+-            "metti su {titolo}",
+-            "mettere su {titolo}",
+-            "continua a guardare {titolo}",
+-            "continuare a guardare {titolo}"
++            "voglio vedere {titolo}"
+           ]
+         }
+       ],
+-- 
+2.43.0
+
+

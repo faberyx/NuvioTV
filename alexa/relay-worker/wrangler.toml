@@ -16,6 +16,5 @@ new_sqlite_classes = ["TvRelay"]
 
 [vars]
 # Alexa developer console -> your skill -> "Copy Skill ID"
-ALEXA_SKILL_ID = "amzn1.ask.skill.REPLACE-ME"
+ALEXA_SKILL_ID = "amzn1.ask.skill.14ceef93-7b91-4de2-bc23-c6a76fe2e7a6"
 
-# TV_TOKEN is a secret: `npx wrangler secret put TV_TOKEN`
