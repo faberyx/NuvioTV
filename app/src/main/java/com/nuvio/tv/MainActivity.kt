@@ -1011,6 +1011,31 @@ open class MainActivity : ComponentActivity() {
                                         com.nuvio.tv.core.voice.VoiceResult.ok("searching")
                                     }
                                 }
+                                // Precheck for "play <title>": the coordinator resolves the
+                                // title only once a screen has agreed it can be opened.
+                                is com.nuvio.tv.core.voice.VoiceCommand.Play -> {
+                                    if (!layoutChosen) {
+                                        com.nuvio.tv.core.voice.VoiceResult.fail("not_ready")
+                                    } else {
+                                        com.nuvio.tv.core.voice.VoiceResult.ok("ready")
+                                    }
+                                }
+                                is com.nuvio.tv.core.voice.VoiceCommand.OpenTitle -> {
+                                    // Same path as "play" from post-play recommendations: the
+                                    // details screen picks the next episode to watch and hands
+                                    // off to the sources screen, which applies auto-play.
+                                    navController.navigate(
+                                        Screen.Detail.createRoute(
+                                            itemId = command.id,
+                                            itemType = command.type,
+                                            addonBaseUrl = command.addonBaseUrl,
+                                            playOnLoad = true
+                                        )
+                                    ) {
+                                        launchSingleTop = true
+                                    }
+                                    com.nuvio.tv.core.voice.VoiceResult.ok("playing")
+                                }
                                 else -> com.nuvio.tv.core.voice.VoiceResult.fail("nothing_playing")
                             }
                         }

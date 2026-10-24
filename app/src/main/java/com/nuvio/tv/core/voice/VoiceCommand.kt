@@ -9,8 +9,10 @@ import org.json.JSONObject
  *   {"id":"<uuid>","cmd":"pause"}
  *   {"id":"<uuid>","cmd":"seek_by","ms":-30000}
  *   {"id":"<uuid>","cmd":"search","query":"the bear"}
+ *   {"id":"<uuid>","cmd":"play","query":"the bear"}
  *
  * Reply (TV -> relay): {"id":"<uuid>","ok":true,"code":"paused"}
+ * ("play" replies also carry "title": the name of the title that was opened.)
  */
 sealed interface VoiceCommand {
     data object Pause : VoiceCommand
@@ -22,6 +24,20 @@ sealed interface VoiceCommand {
     data object Stop : VoiceCommand
     data class Search(val query: String) : VoiceCommand
 
+    /** Find a title by name and start it (series resume from watch progress). */
+    data class Play(val query: String) : VoiceCommand
+
+    /**
+     * Internal, never on the wire: produced by [VoicePlayCoordinator] once [Play] has been
+     * resolved to a catalog item. The app-level handler opens it with play-on-load.
+     */
+    data class OpenTitle(
+        val id: String,
+        val type: String,
+        val name: String,
+        val addonBaseUrl: String?,
+    ) : VoiceCommand
+
     companion object {
         fun fromJson(json: JSONObject): VoiceCommand? = when (json.optString("cmd")) {
             "pause" -> Pause
@@ -32,6 +48,7 @@ sealed interface VoiceCommand {
             "skip_intro" -> SkipIntro
             "stop" -> Stop
             "search" -> json.optString("query").trim().takeIf { it.isNotEmpty() }?.let(::Search)
+            "play" -> json.optString("query").trim().takeIf { it.isNotEmpty() }?.let(::Play)
             else -> null
         }
     }
@@ -39,11 +56,11 @@ sealed interface VoiceCommand {
 
 /**
  * Outcome of a command. [code] is a stable machine-readable string; the relay maps it to
- * the spoken Italian reply, so the app never has to localize Alexa responses.
+ * the spoken reply (Italian or English), so the app never has to localize Alexa responses.
  */
-data class VoiceResult(val ok: Boolean, val code: String) {
+data class VoiceResult(val ok: Boolean, val code: String, val title: String? = null) {
     companion object {
-        fun ok(code: String) = VoiceResult(true, code)
+        fun ok(code: String, title: String? = null) = VoiceResult(true, code, title)
         fun fail(code: String) = VoiceResult(false, code)
     }
 }

@@ -18,6 +18,8 @@ export interface Env {
 }
 
 const TV_REPLY_TIMEOUT_MS = 4_000;
+// "play" makes the TV search the addon catalogs first; Alexa allows ~8 s per request.
+const TV_PLAY_TIMEOUT_MS = 7_000;
 
 async function constantTimeEquals(a: string, b: string): Promise<boolean> {
   const enc = new TextEncoder();
@@ -134,7 +136,7 @@ export class TvRelay implements DurableObject {
         this.pending.set(id, resolve);
         setTimeout(() => {
           if (this.pending.delete(id)) resolve({ ok: false, code: "timeout" });
-        }, TV_REPLY_TIMEOUT_MS);
+        }, command.cmd === "play" ? TV_PLAY_TIMEOUT_MS : TV_REPLY_TIMEOUT_MS);
       });
       try {
         socket.send(JSON.stringify({ id, ...command }));
@@ -150,7 +152,7 @@ export class TvRelay implements DurableObject {
 
   async webSocketMessage(_ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
     if (typeof message !== "string") return;
-    let parsed: { id?: unknown; ok?: unknown; code?: unknown };
+    let parsed: { id?: unknown; ok?: unknown; code?: unknown; title?: unknown };
     try {
       parsed = JSON.parse(message);
     } catch {
@@ -160,7 +162,11 @@ export class TvRelay implements DurableObject {
     const resolve = this.pending.get(parsed.id);
     if (!resolve) return;
     this.pending.delete(parsed.id);
-    resolve({ ok: parsed.ok === true, code: String(parsed.code ?? "") });
+    resolve({
+      ok: parsed.ok === true,
+      code: String(parsed.code ?? ""),
+      ...(typeof parsed.title === "string" && parsed.title ? { title: parsed.title } : {}),
+    });
   }
 
   async webSocketClose(ws: WebSocket, code: number, reason: string): Promise<void> {

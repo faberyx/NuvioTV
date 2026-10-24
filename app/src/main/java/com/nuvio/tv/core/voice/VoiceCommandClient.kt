@@ -29,6 +29,7 @@ import javax.inject.Singleton
 class VoiceCommandClient @Inject constructor(
     baseClient: OkHttpClient,
     private val bus: VoiceCommandBus,
+    private val playCoordinator: VoicePlayCoordinator,
 ) {
     private val client: OkHttpClient = baseClient.newBuilder()
         .cache(null)
@@ -98,16 +99,17 @@ class VoiceCommandClient @Inject constructor(
             val id = json.optString("id").takeIf { it.isNotEmpty() } ?: return
             scope.launch {
                 val command = VoiceCommand.fromJson(json)
-                val result = if (command == null) {
-                    VoiceResult.fail("unknown_command")
-                } else {
-                    bus.dispatch(command)
+                val result = when (command) {
+                    null, is VoiceCommand.OpenTitle -> VoiceResult.fail("unknown_command")
+                    is VoiceCommand.Play -> playCoordinator.play(command.query)
+                    else -> bus.dispatch(command)
                 }
                 Log.d(TAG, "command=$command result=$result")
                 val reply = JSONObject()
                     .put("id", id)
                     .put("ok", result.ok)
                     .put("code", result.code)
+                result.title?.let { reply.put("title", it) }
                 webSocket.send(reply.toString())
             }
         }

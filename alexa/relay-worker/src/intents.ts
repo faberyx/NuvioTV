@@ -13,11 +13,14 @@ export type TvCommand =
   | { cmd: "next_episode" }
   | { cmd: "skip_intro" }
   | { cmd: "stop" }
-  | { cmd: "search"; query: string };
+  | { cmd: "search"; query: string }
+  | { cmd: "play"; query: string };
 
 export interface TvReply {
   ok: boolean;
   code: string;
+  /** For "play": the name of the title the TV opened. */
+  title?: string;
 }
 
 export interface AlexaResponse {
@@ -50,8 +53,9 @@ const UNITS: Record<Lang, { h: [string, string]; m: [string, string]; s: [string
 const T = {
   it: {
     help:
-      "Puoi dire: metti in pausa, riprendi, vai avanti di trenta secondi, torna indietro di un minuto, " +
-      "vai al minuto venti, prossimo episodio, salta l'intro, chiudi il video, oppure cerca seguito da un titolo.",
+      "Puoi dire: guarda seguito da un titolo, metti in pausa, riprendi, vai avanti di trenta secondi, " +
+      "torna indietro di un minuto, vai al minuto venti, prossimo episodio, salta l'intro, chiudi il video, " +
+      "oppure cerca seguito da un titolo.",
     ready: "Nuvio è pronto.",
     whatNext: "Cosa vuoi fare?",
     didntUnderstand: "Non ho capito.",
@@ -60,6 +64,8 @@ const T = {
     askMinuteReprompt: "Dimmi il minuto, per esempio vai al minuto venti.",
     askQuery: "Cosa vuoi cercare?",
     askQueryReprompt: "Dimmi il titolo da cercare.",
+    askPlay: "Cosa vuoi guardare?",
+    askPlayReprompt: "Dimmi il titolo, per esempio guarda The Bear.",
     done: "Fatto.",
     failed: "Non ci sono riuscita.",
     codes: {
@@ -75,12 +81,14 @@ const T = {
       skipped_intro: "Saltata.",
       no_intro: "Adesso non c'è niente da saltare.",
       stopped: "Video chiuso.",
-      stop_playback_first: "Prima chiudi il video, poi chiedimi di cercare.",
+      stop_playback_first: "Prima chiudi il video, poi chiedimelo di nuovo.",
       nothing_playing: "Non c'è niente in riproduzione.",
       not_ready: "Nuvio non è ancora pronto.",
       tv_offline: "Nuvio non è aperto sulla TV, oppure non è connesso.",
       timeout: "La TV non ha risposto.",
     } as Record<string, string>,
+    playing: (title: string) => `Avvio ${title}.`,
+    notFound: (q: string) => `Non ho trovato ${q}, ti mostro i risultati della ricerca.`,
     forward: (d: string) => `Avanti di ${d}.`,
     back: (d: string) => `Indietro di ${d}.`,
     toMinute: (m: number) => `Vado al minuto ${m}.`,
@@ -89,8 +97,8 @@ const T = {
   },
   en: {
     help:
-      "You can say: pause, resume, skip forward thirty seconds, go back one minute, go to minute twenty, " +
-      "next episode, skip the intro, close the video, or search for followed by a title.",
+      "You can say: play followed by a title, pause, resume, skip forward thirty seconds, go back one minute, " +
+      "go to minute twenty, next episode, skip the intro, close the video, or search for followed by a title.",
     ready: "Nuvio is ready.",
     whatNext: "What would you like to do?",
     didntUnderstand: "Sorry, I didn't get that.",
@@ -99,6 +107,8 @@ const T = {
     askMinuteReprompt: "Tell me the minute, for example go to minute twenty.",
     askQuery: "What do you want to search for?",
     askQueryReprompt: "Tell me the title to search for.",
+    askPlay: "What do you want to watch?",
+    askPlayReprompt: "Tell me the title, for example play The Bear.",
     done: "Done.",
     failed: "Sorry, I couldn't do that.",
     codes: {
@@ -114,12 +124,14 @@ const T = {
       skipped_intro: "Skipped.",
       no_intro: "There's nothing to skip right now.",
       stopped: "Video closed.",
-      stop_playback_first: "Close the video first, then ask me to search.",
+      stop_playback_first: "Close the video first, then ask me again.",
       nothing_playing: "Nothing is playing.",
       not_ready: "Nuvio isn't ready yet.",
       tv_offline: "Nuvio isn't open on the TV, or it isn't connected.",
       timeout: "The TV didn't respond.",
     } as Record<string, string>,
+    playing: (title: string) => `Starting ${title}.`,
+    notFound: (q: string) => `I couldn't find ${q}, so I've opened the search results.`,
     forward: (d: string) => `Skipped forward ${d}.`,
     back: (d: string) => `Went back ${d}.`,
     toMinute: (m: number) => `Going to minute ${m}.`,
@@ -221,6 +233,11 @@ export function mapRequest(request: {
       if (!query) return reply(say(t.askQuery, false, t.askQueryReprompt));
       return cmd({ cmd: "search", query });
     }
+    case "GuardaIntent": {
+      const query = slots.titolo?.value?.trim();
+      if (!query) return reply(say(t.askPlay, false, t.askPlayReprompt));
+      return cmd({ cmd: "play", query });
+    }
     case "AMAZON.HelpIntent":
       return reply(say(t.help, false, t.whatNext));
     case "AMAZON.StopIntent":
@@ -247,6 +264,10 @@ export function speakResult(command: TvCommand, result: TvReply, lang: Lang = "i
       return t.toTime(speakDuration(command.ms, lang));
     case "searching":
       return command.cmd === "search" ? t.searching(command.query) : t.done;
+    case "playing":
+      return t.playing(result.title || (command.cmd === "play" ? command.query : ""));
+    case "not_found_searching":
+      return command.cmd === "play" ? t.notFound(command.query) : t.done;
     default:
       return t.codes[result.code] ?? (result.ok ? t.done : t.failed);
   }

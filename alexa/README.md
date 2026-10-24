@@ -2,10 +2,10 @@
 
 Control Nuvio on the TV from an Echo while the app is open:
 
-> "Alexa, chiedi a nuvio tv di mettere in pausa"
-> "Alexa, chiedi a nuvio tv di andare avanti di due minuti"
-> "Alexa, chiedi a nuvio tv di cercare the bear"
-> "Alexa, ask nuvio tv to skip forward two minutes"
+> "Alexa, chiedi a home tv di mettere in pausa"
+> "Alexa, chiedi a home tv di andare avanti di due minuti"
+> "Alexa, chiedi a home tv di cercare the bear"
+> "Alexa, ask home tv to skip forward two minutes"
 
 The skill ships Italian (it-IT) and English (en-US, en-GB) models, and Alexa answers in the
 language of the request. **The Echo's language setting decides which model is used**
@@ -23,7 +23,7 @@ or with the app in the background.
 
 ## Commands
 
-| Say (after "chiedi a nuvio tv di…") | Does |
+| Say (after "chiedi a home tv di…") | Does |
 |---|---|
 | mettere in pausa / riprendere | pause / resume |
 | andare avanti di 30 secondi · tornare indietro di 2 minuti | seek by (defaults are +30 s and −10 s) |
@@ -31,13 +31,14 @@ or with the app in the background.
 | mettere il prossimo episodio | next episode (series) |
 | saltare l'intro / la sigla / il riassunto | skip the active intro or recap |
 | chiudere il video | exit the player |
+| guardare *titolo* · riprodurre *titolo* · fammi vedere *titolo* | find the title and start it: series resume where you left off; sources follow your Stream auto-play setting (Manual = you pick) |
 | cercare *titolo* | open Search with the query (only when no video is playing) |
 
-English, after "ask nuvio tv to…": pause · resume · skip forward 30 seconds · go back 2 minutes ·
+English, after "ask home tv to…": play *title* · watch *title* · pause · resume · skip forward 30 seconds · go back 2 minutes ·
 go to minute 20 · go to 1 hour and 5 minutes · play the next episode · skip the intro / recap ·
 close the video · search for *title*.
 
-You can also say "Alexa, apri nuvio tv" (or "Alexa, open nuvio tv") and then give the command
+You can also say "Alexa, apri home tv" (or "Alexa, open home tv") and then give the command
 without the prefix.
 
 ## 1. Deploy the relay (Cloudflare Workers, Free plan is enough)

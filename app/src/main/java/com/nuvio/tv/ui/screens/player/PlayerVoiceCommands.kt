@@ -75,6 +75,8 @@ internal fun PlayerViewModel.handleVoiceCommand(
 
         // Navigating away mid-playback would leave the player in a half-released state;
         // ask the user to stop first instead.
-        is VoiceCommand.Search -> VoiceResult.fail("stop_playback_first")
+        is VoiceCommand.Search,
+        is VoiceCommand.Play,
+        is VoiceCommand.OpenTitle -> VoiceResult.fail("stop_playback_first")
     }
 }
