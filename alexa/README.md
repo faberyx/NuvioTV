@@ -31,7 +31,7 @@ or with the app in the background.
 | mettere il prossimo episodio | next episode (series) |
 | saltare l'intro / la sigla / il riassunto | skip the active intro or recap |
 | chiudere il video | exit the player |
-| guardare *titolo* · riprodurre *titolo* · fammi vedere *titolo* | find the title and start it: series resume where you left off; sources follow your Stream auto-play setting (Manual = you pick) |
+| guardare *titolo* · riprodurre *titolo* · fammi vedere *titolo* | find the title and start it (stops the current video first): series resume where you left off; sources follow your Stream auto-play setting (Manual = you pick) |
 | cercare *titolo* | open Search with the query (only when no video is playing) |
 
 English, after "ask home tv to…": play *title* · watch *title* · pause · resume · skip forward 30 seconds · go back 2 minutes ·

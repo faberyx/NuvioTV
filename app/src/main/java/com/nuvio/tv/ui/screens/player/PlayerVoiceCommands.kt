@@ -73,10 +73,16 @@ internal fun PlayerViewModel.handleVoiceCommand(
             VoiceResult.ok("stopped")
         }
 
-        // Navigating away mid-playback would leave the player in a half-released state;
-        // ask the user to stop first instead.
-        is VoiceCommand.Search,
-        is VoiceCommand.Play,
-        is VoiceCommand.OpenTitle -> VoiceResult.fail("stop_playback_first")
+        // "Play <title>" while something is playing: keep playing while the title is looked up
+        // (so a failed lookup interrupts nothing), then exit the player exactly like pressing
+        // Back (progress saved, player released) and let the app-level handler open the title.
+        is VoiceCommand.Play -> VoiceResult.ok(VoiceResult.PLAY_READY_WHILE_PLAYING)
+        is VoiceCommand.OpenTitle -> {
+            exitPlayer()
+            null
+        }
+
+        // Search has no "go back to what I was watching" path, so ask the user to stop first.
+        is VoiceCommand.Search -> VoiceResult.fail("stop_playback_first")
     }
 }

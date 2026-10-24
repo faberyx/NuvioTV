@@ -89,6 +89,7 @@ const T = {
     } as Record<string, string>,
     playing: (title: string) => `Avvio ${title}.`,
     notFound: (q: string) => `Non ho trovato ${q}, ti mostro i risultati della ricerca.`,
+    notFoundKeepPlaying: (q: string) => `Non ho trovato ${q}.`,
     forward: (d: string) => `Avanti di ${d}.`,
     back: (d: string) => `Indietro di ${d}.`,
     toMinute: (m: number) => `Vado al minuto ${m}.`,
@@ -132,6 +133,7 @@ const T = {
     } as Record<string, string>,
     playing: (title: string) => `Starting ${title}.`,
     notFound: (q: string) => `I couldn't find ${q}, so I've opened the search results.`,
+    notFoundKeepPlaying: (q: string) => `I couldn't find ${q}.`,
     forward: (d: string) => `Skipped forward ${d}.`,
     back: (d: string) => `Went back ${d}.`,
     toMinute: (m: number) => `Going to minute ${m}.`,
@@ -267,7 +269,9 @@ export function speakResult(command: TvCommand, result: TvReply, lang: Lang = "i
     case "playing":
       return t.playing(result.title || (command.cmd === "play" ? command.query : ""));
     case "not_found_searching":
-      return command.cmd === "play" ? t.notFound(command.query) : t.done;
+      return command.cmd === "play" ? t.notFound(command.query) : t.failed;
+    case "not_found":
+      return command.cmd === "play" ? t.notFoundKeepPlaying(command.query) : t.failed;
     default:
       return t.codes[result.code] ?? (result.ok ? t.done : t.failed);
   }

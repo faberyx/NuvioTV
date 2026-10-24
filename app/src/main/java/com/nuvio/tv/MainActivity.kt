@@ -1024,6 +1024,9 @@ open class MainActivity : ComponentActivity() {
                                     // Same path as "play" from post-play recommendations: the
                                     // details screen picks the next episode to watch and hands
                                     // off to the sources screen, which applies auto-play.
+                                    // If a video was playing, the player handler has already
+                                    // exited it. No launchSingleTop: the top entry may be another
+                                    // title's details, which must not be reused.
                                     navController.navigate(
                                         Screen.Detail.createRoute(
                                             itemId = command.id,
@@ -1031,9 +1034,7 @@ open class MainActivity : ComponentActivity() {
                                             addonBaseUrl = command.addonBaseUrl,
                                             playOnLoad = true
                                         )
-                                    ) {
-                                        launchSingleTop = true
-                                    }
+                                    )
                                     com.nuvio.tv.core.voice.VoiceResult.ok("playing")
                                 }
                                 else -> com.nuvio.tv.core.voice.VoiceResult.fail("nothing_playing")

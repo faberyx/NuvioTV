@@ -7,11 +7,12 @@ import javax.inject.Singleton
 
 /**
  * "Play <title>" in three steps:
- *  1. ask the screens whether a title may be opened right now (the player refuses while a
- *     video is on screen, the app refuses before onboarding is done);
+ *  1. ask the screens whether a title may be opened right now (the app refuses before
+ *     onboarding is done; the player answers "ready while playing" and keeps playing);
  *  2. resolve the spoken title against the addon catalogs;
  *  3. open it with play-on-load (series resume from watch progress, sources follow the user's
- *     stream auto-play setting). No confident match falls back to the Search screen.
+ *     stream auto-play setting). If a video is playing, the player exits first.
+ * No match: open the Search screen, or, if a video is playing, leave it playing.
  */
 @Singleton
 class VoicePlayCoordinator @Inject constructor(
@@ -21,12 +22,14 @@ class VoicePlayCoordinator @Inject constructor(
     suspend fun play(query: String): VoiceResult {
         val precheck = bus.dispatch(VoiceCommand.Play(query))
         if (!precheck.ok) return precheck
+        val videoPlaying = precheck.code == VoiceResult.PLAY_READY_WHILE_PLAYING
 
         val match = runCatching { withTimeoutOrNull(RESOLVE_TIMEOUT_MS) { resolver.resolve(query) } }
             .onFailure { Log.w(TAG, "title lookup failed for '$query'", it) }
             .getOrNull()
 
         if (match == null) {
+            if (videoPlaying) return VoiceResult.fail("not_found")
             val search = bus.dispatch(VoiceCommand.Search(query))
             return if (search.ok) VoiceResult.fail("not_found_searching") else search
         }

@@ -62,5 +62,8 @@ data class VoiceResult(val ok: Boolean, val code: String, val title: String? = n
     companion object {
         fun ok(code: String, title: String? = null) = VoiceResult(true, code, title)
         fun fail(code: String) = VoiceResult(false, code)
+
+        /** Precheck answer for [VoiceCommand.Play] when a video is on screen. */
+        const val PLAY_READY_WHILE_PLAYING = "ready_while_playing"
     }
 }
