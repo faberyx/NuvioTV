@@ -208,20 +208,7 @@
             }
           ],
           "samples": [
-            "guarda {titolo}",
-            "guardare {titolo}",
-            "riproduci {titolo}",
-            "riprodurre {titolo}",
-            "fammi vedere {titolo}",
-            "farmi vedere {titolo}",
-            "voglio vedere {titolo}",
-            "voglio guardare {titolo}",
-            "avvia {titolo}",
-            "avviare {titolo}",
-            "metti su {titolo}",
-            "mettere su {titolo}",
-            "continua a guardare {titolo}",
-            "continuare a guardare {titolo}"
+            "voglio vedere {titolo}"
           ]
         }
       ],

@@ -31,10 +31,10 @@ or with the app in the background.
 | mettere il prossimo episodio | next episode (series) |
 | saltare l'intro / la sigla / il riassunto | skip the active intro or recap |
 | chiudere il video | exit the player |
-| guardare *titolo* · riprodurre *titolo* · fammi vedere *titolo* | find the title and start it (stops the current video first): series resume where you left off; sources follow your Stream auto-play setting (Manual = you pick) |
+| voglio vedere *titolo* (say it after "Alexa, apri home tv") | find the title and start it (stops the current video first): series resume where you left off; sources follow your Stream auto-play setting (Manual = you pick) |
 | cercare *titolo* | open Search with the query (only when no video is playing) |
 
-English, after "ask home tv to…": play *title* · watch *title* · pause · resume · skip forward 30 seconds · go back 2 minutes ·
+English, after "ask home tv to…": play *title* · pause · resume · skip forward 30 seconds · go back 2 minutes ·
 go to minute 20 · go to 1 hour and 5 minutes · play the next episode · skip the intro / recap ·
 close the video · search for *title*.
 

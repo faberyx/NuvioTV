@@ -53,7 +53,7 @@ const UNITS: Record<Lang, { h: [string, string]; m: [string, string]; s: [string
 const T = {
   it: {
     help:
-      "Puoi dire: guarda seguito da un titolo, metti in pausa, riprendi, vai avanti di trenta secondi, " +
+      "Puoi dire: voglio vedere seguito da un titolo, metti in pausa, riprendi, vai avanti di trenta secondi, " +
       "torna indietro di un minuto, vai al minuto venti, prossimo episodio, salta l'intro, chiudi il video, " +
       "oppure cerca seguito da un titolo.",
     ready: "Nuvio è pronto.",
@@ -65,7 +65,7 @@ const T = {
     askQuery: "Cosa vuoi cercare?",
     askQueryReprompt: "Dimmi il titolo da cercare.",
     askPlay: "Cosa vuoi guardare?",
-    askPlayReprompt: "Dimmi il titolo, per esempio guarda The Bear.",
+    askPlayReprompt: "Dimmi il titolo, per esempio voglio vedere The Bear.",
     done: "Fatto.",
     failed: "Non ci sono riuscita.",
     codes: {

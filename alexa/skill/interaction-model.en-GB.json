@@ -186,15 +186,7 @@
             }
           ],
           "samples": [
-            "play {titolo}",
-            "watch {titolo}",
-            "put on {titolo}",
-            "start {titolo}",
-            "start watching {titolo}",
-            "i want to watch {titolo}",
-            "let me watch {titolo}",
-            "continue watching {titolo}",
-            "keep watching {titolo}"
+            "play {titolo}"
           ]
         }
       ],
