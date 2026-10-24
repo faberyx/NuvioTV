@@ -1,7 +1,1171 @@
+From 36bfd0c743f4f120fbe1045dc7a4c3dc3da0dcb9 Mon Sep 17 00:00:00 2001
+From: Fabrizio Catitti <fabrizio.catitti@gmail.com>
+Date: Sat, 24 Oct 2026 15:43:25 +0200
+Subject: [PATCH 1/4] feat(voice): year/type hints for "play", honest
+ next-episode results
+
+- Resolver parses a trailing year ("dune 2021", "dune del 2021") and a
+  leading type ("il film", "la serie", "the movie", "the series") from the
+  spoken title, searches both the bare and full text, and ranks with year
+  (+50/-50, series match any year they ran) and type (+20/-60) adjustments.
+  Titles ending in or made of a number still match exactly.
+- Alexa says the year of the title it opened.
+- Next episode mirrors playNextEpisode's silent early returns (not loaded,
+  not aired, watch-party lock, countdown running) and reports when Manual
+  auto-play opens the source list instead of starting playback.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JQ7oit84w6xrrRhN57hYZw
+---
+ alexa/README.md                               |   4 +-
+ alexa/relay-worker/src/intents.ts             |   8 +
+ .../com/nuvio/tv/core/voice/VoiceCommand.kt   |   1 +
+ .../tv/core/voice/VoicePlayCoordinator.kt     |   3 +-
+ .../nuvio/tv/core/voice/VoiceTitleResolver.kt | 138 +++++++++++++++---
+ .../ui/screens/player/PlayerVoiceCommands.kt  |  35 ++++-
+ 6 files changed, 155 insertions(+), 34 deletions(-)
+
+diff --git a/alexa/README.md b/alexa/README.md
+index 7b6b3ae..faf0e1a 100644
+--- a/alexa/README.md
++++ b/alexa/README.md
+@@ -28,10 +28,10 @@ or with the app in the background.
+ | mettere in pausa / riprendere | pause / resume |
+ | andare avanti di 30 secondi · tornare indietro di 2 minuti | seek by (defaults are +30 s and −10 s) |
+ | andare al minuto 20 · andare a 1 ora e 5 minuti | seek to |
+-| mettere il prossimo episodio | next episode (series) |
++| mettere il prossimo episodio | next episode (series). With Stream auto-play on Manual this opens the next episode's source list, same as the remote button |
+ | saltare l'intro / la sigla / il riassunto | skip the active intro or recap |
+ | chiudere il video | exit the player |
+-| voglio vedere *titolo* (say it after "Alexa, apri home tv") | find the title and start it (stops the current video first): series resume where you left off; sources follow your Stream auto-play setting (Manual = you pick) |
++| voglio vedere *titolo* (say it after "Alexa, apri home tv"). Add a year or the type to pick between same-name titles: "voglio vedere dune del 2021", "voglio vedere il film dune", "voglio vedere la serie the office" | find the title and start it (stops the current video first): series resume where you left off; sources follow your Stream auto-play setting (Manual = you pick) |
+ | cercare *titolo* | open Search with the query (only when no video is playing) |
+ 
+ English, after "ask home tv to…": play *title* · pause · resume · skip forward 30 seconds · go back 2 minutes ·
+diff --git a/alexa/relay-worker/src/intents.ts b/alexa/relay-worker/src/intents.ts
+index 2ce7fdd..dae3767 100644
+--- a/alexa/relay-worker/src/intents.ts
++++ b/alexa/relay-worker/src/intents.ts
+@@ -78,6 +78,10 @@ const T = {
+       live: "In una diretta non posso spostarmi.",
+       next_episode: "Metto il prossimo episodio.",
+       no_next_episode: "Non c'è un episodio successivo.",
++      next_not_aired: "Il prossimo episodio non è ancora uscito.",
++      next_episode_starting: "Il prossimo episodio sta già partendo.",
++      next_episode_pick_source: "Scegli la fonte del prossimo episodio sulla TV.",
++      party_locked: "Durante il watch party solo chi lo gestisce può cambiare episodio.",
+       skipped_intro: "Saltata.",
+       no_intro: "Adesso non c'è niente da saltare.",
+       stopped: "Video chiuso.",
+@@ -122,6 +126,10 @@ const T = {
+       live: "I can't seek in a live stream.",
+       next_episode: "Playing the next episode.",
+       no_next_episode: "There's no next episode.",
++      next_not_aired: "The next episode hasn't aired yet.",
++      next_episode_starting: "The next episode is already starting.",
++      next_episode_pick_source: "Pick a source for the next episode on the TV.",
++      party_locked: "In a watch party only the host can change the episode.",
+       skipped_intro: "Skipped.",
+       no_intro: "There's nothing to skip right now.",
+       stopped: "Video closed.",
+diff --git a/app/src/main/java/com/nuvio/tv/core/voice/VoiceCommand.kt b/app/src/main/java/com/nuvio/tv/core/voice/VoiceCommand.kt
+index 5041206..11c6865 100644
+--- a/app/src/main/java/com/nuvio/tv/core/voice/VoiceCommand.kt
++++ b/app/src/main/java/com/nuvio/tv/core/voice/VoiceCommand.kt
+@@ -36,6 +36,7 @@ sealed interface VoiceCommand {
+         val type: String,
+         val name: String,
+         val addonBaseUrl: String?,
++        val year: Int? = null,
+     ) : VoiceCommand
+ 
+     companion object {
+diff --git a/app/src/main/java/com/nuvio/tv/core/voice/VoicePlayCoordinator.kt b/app/src/main/java/com/nuvio/tv/core/voice/VoicePlayCoordinator.kt
+index b052a32..6b65862 100644
+--- a/app/src/main/java/com/nuvio/tv/core/voice/VoicePlayCoordinator.kt
++++ b/app/src/main/java/com/nuvio/tv/core/voice/VoicePlayCoordinator.kt
+@@ -35,7 +35,8 @@ class VoicePlayCoordinator @Inject constructor(
+         }
+ 
+         val opened = bus.dispatch(match)
+-        return if (opened.ok) opened.copy(title = match.name) else opened
++        val spokenTitle = match.year?.let { "${match.name} ($it)" } ?: match.name
++        return if (opened.ok) opened.copy(title = spokenTitle) else opened
+     }
+ 
+     private companion object {
+diff --git a/app/src/main/java/com/nuvio/tv/core/voice/VoiceTitleResolver.kt b/app/src/main/java/com/nuvio/tv/core/voice/VoiceTitleResolver.kt
+index a413f6e..b43c8e6 100644
+--- a/app/src/main/java/com/nuvio/tv/core/voice/VoiceTitleResolver.kt
++++ b/app/src/main/java/com/nuvio/tv/core/voice/VoiceTitleResolver.kt
+@@ -18,12 +18,23 @@ import javax.inject.Inject
+ import javax.inject.Singleton
+ 
+ /**
+- * Turns a spoken title ("the bear") into a catalog item, using the same searchable
+- * movie/series catalogs of the installed addons that the Search screen queries.
++ * Turns a spoken title into a catalog item, using the same searchable movie/series catalogs of
++ * the installed addons that the Search screen queries.
+  *
+- * Ranking: an exact (normalised) name match wins ("the bear" prefers "The Bear" over "Bear"),
+- * then a match ignoring a leading article, then names starting with / containing the query;
+- * ties go to the addon order (as installed) and then the addon's own result order.
++ * The spoken text may carry hints, which Alexa cannot deliver as separate slots next to a
++ * free-text title, so they are parsed out here:
++ *   "dune 2021", "dune del 2021", "dune from 2021"  -> year 2021
++ *   "il film dune", "the movie dune"               -> movies only
++ *   "la serie the office", "the series the office" -> series only
++ *
++ * Ranking, best first:
++ *   1. exact name match ("the bear" prefers "The Bear" over "Bear"), then ignoring a leading
++ *      article, then names starting with / containing the title;
++ *   2. +50 when the year matches (series: any year the show ran), -50 when it clearly doesn't;
++ *   3. +20 when the type hint matches, -60 when it doesn't;
++ *   ties: addon order as installed, then the addon's own (popularity) order.
++ * The unparsed text is scored too, so titles that end in a number ("Blade Runner 2049") or
++ * are a number ("1917") still match exactly.
+  */
+ @Singleton
+ class VoiceTitleResolver @Inject constructor(
+@@ -32,33 +43,39 @@ class VoiceTitleResolver @Inject constructor(
+ ) {
+ 
+     suspend fun resolve(query: String): VoiceCommand.OpenTitle? = coroutineScope {
+-        val wanted = normalize(query)
+-        if (wanted.isEmpty() || stripArticle(wanted).isEmpty()) return@coroutineScope null
++        val parsed = parseQuery(query) ?: return@coroutineScope null
+ 
+         val addons = addonRepository.getInstalledAddons().first().enabledAddons()
++        // The type hint only affects ranking, not which catalogs are searched: a title can
++        // itself start with "the show" or "film".
+         val targets = searchTargets(addons)
+ 
+-        val rows = targets.mapIndexed { index, (addon, catalog) ->
+-            async {
+-                val result = withTimeoutOrNull(PER_CATALOG_TIMEOUT_MS) {
+-                    catalogRepository.getCatalog(
+-                        addonBaseUrl = addon.baseUrl,
+-                        addonId = addon.id,
+-                        addonName = addon.displayName,
+-                        catalogId = catalog.id,
+-                        catalogName = catalog.name,
+-                        type = catalog.apiType,
+-                        extraArgs = mapOf("search" to query),
+-                    ).first { it !is NetworkResult.Loading }
++        // Search the bare title; also the full text when it differs, for titles with numbers.
++        val searchTerms = listOf(parsed.title, parsed.full).distinct()
++        val rows = targets.flatMapIndexed { index, (addon, catalog) ->
++            searchTerms.map { term ->
++                async {
++                    val result = withTimeoutOrNull(PER_CATALOG_TIMEOUT_MS) {
++                        catalogRepository.getCatalog(
++                            addonBaseUrl = addon.baseUrl,
++                            addonId = addon.id,
++                            addonName = addon.displayName,
++                            catalogId = catalog.id,
++                            catalogName = catalog.name,
++                            type = catalog.apiType,
++                            extraArgs = mapOf("search" to term),
++                        ).first { it !is NetworkResult.Loading }
++                    }
++                    (result as? NetworkResult.Success)?.data?.let { index to it }
+                 }
+-                (result as? NetworkResult.Success)?.data?.let { index to it }
+             }
+         }.awaitAll().filterNotNull()
+ 
+         rows.flatMap { (catalogIndex, row) ->
+             row.items.take(MAX_ITEMS_PER_CATALOG).mapIndexed { rank, item ->
++                val years = releaseYears(item.releaseInfo)
+                 Candidate(
+-                    score = score(wanted, normalize(item.name)),
++                    score = score(parsed, normalize(item.name), item.type, years),
+                     catalogIndex = catalogIndex,
+                     rank = rank,
+                     title = VoiceCommand.OpenTitle(
+@@ -66,6 +83,7 @@ class VoiceTitleResolver @Inject constructor(
+                         type = item.apiType,
+                         name = item.name,
+                         addonBaseUrl = row.addonBaseUrl,
++                        year = years?.first,
+                     ),
+                 )
+             }
+@@ -100,11 +118,26 @@ class VoiceTitleResolver @Inject constructor(
+         supportsExtra("search") &&
+             extra.none { it.isRequired && !it.name.equals("search", ignoreCase = true) }
+ 
++    /** [full] = the whole spoken text normalised; [title] = with year / type hints removed. */
++    internal data class ParsedQuery(
++        val full: String,
++        val title: String,
++        val year: Int?,
++        val type: ContentType?,
++    )
++
+     internal companion object {
+         const val PER_CATALOG_TIMEOUT_MS = 4_000L
+         const val MAX_ITEMS_PER_CATALOG = 10
+ 
+         private val LEADING_ARTICLE = Regex("^(the|a|an|il|lo|la|i|gli|le|l|un|uno|una)\\s+")
++        private val YEAR = Regex("^(19|20)\\d{2}$")
++        private val YEAR_CONNECTORS = setOf("del", "dal", "nel", "anno", "dell", "from", "of", "in", "year")
++        private val MOVIE_PREFIXES = listOf("il film", "un film", "film", "the movie", "a movie", "movie")
++        private val SERIES_PREFIXES = listOf(
++            "la serie tv", "la serie", "serie tv", "serie", "the tv series", "the tv show", "the series",
++            "the show", "tv series", "tv show", "series",
++        )
+ 
+         /** Lower-case, strip accents and punctuation, collapse spaces. */
+         fun normalize(value: String): String =
+@@ -117,9 +150,50 @@ class VoiceTitleResolver @Inject constructor(
+ 
+         fun stripArticle(normalized: String): String = normalized.replace(LEADING_ARTICLE, "")
+ 
+-        /** Both arguments already [normalize]d. */
+-        fun score(wanted: String, candidate: String): Int {
+-            if (candidate.isEmpty()) return 0
++        fun parseQuery(query: String): ParsedQuery? {
++            val full = normalize(query)
++            if (stripArticle(full).isEmpty()) return null
++            var words = full.split(' ')
++            var type: ContentType? = null
++
++            fun stripPrefix(prefixes: List<String>, kind: ContentType) {
++                if (type != null) return
++                val joined = words.joinToString(" ")
++                val prefix = prefixes.firstOrNull { joined.startsWith("$it ") } ?: return
++                val rest = joined.removePrefix("$prefix ").split(' ')
++                if (rest.isNotEmpty() && rest.first().isNotEmpty()) {
++                    words = rest
++                    type = kind
++                }
++            }
++            stripPrefix(SERIES_PREFIXES, ContentType.SERIES)
++            stripPrefix(MOVIE_PREFIXES, ContentType.MOVIE)
++
++            var year: Int? = null
++            if (words.size > 1 && YEAR.matches(words.last())) {
++                year = words.last().toInt()
++                words = words.dropLast(1)
++                while (words.size > 1 && words.last() in YEAR_CONNECTORS) words = words.dropLast(1)
++            }
++            return ParsedQuery(full = full, title = words.joinToString(" "), year = year, type = type)
++        }
++
++        /** "2021" -> 2021..2021, "2019–2023" -> 2019..2023, "2019-" -> 2019..(open). */
++        fun releaseYears(releaseInfo: String?): Pair<Int, Int>? {
++            val years = Regex("(19|20)\\d{2}").findAll(releaseInfo.orEmpty()).map { it.value.toInt() }.toList()
++            val start = years.firstOrNull() ?: return null
++            val openEnded = releaseInfo.orEmpty().trimEnd().let { it.endsWith("-") || it.endsWith("–") }
++            val end = when {
++                years.size > 1 -> years[1]
++                openEnded -> Int.MAX_VALUE
++                else -> start
++            }
++            return start to end
++        }
++
++        /** Name similarity only; both arguments already [normalize]d. */
++        fun nameScore(wanted: String, candidate: String): Int {
++            if (candidate.isEmpty() || wanted.isEmpty()) return 0
+             val bareWanted = stripArticle(wanted)
+             val bareCandidate = stripArticle(candidate)
+             return when {
+@@ -131,5 +205,21 @@ class VoiceTitleResolver @Inject constructor(
+                 else -> 10 // the addon still ranked it for this query
+             }
+         }
++
++        fun score(parsed: ParsedQuery, candidate: String, type: ContentType, years: Pair<Int, Int>?): Int {
++            val typeAdjust = when {
++                parsed.type == null -> 0
++                parsed.type == type -> 20
++                else -> -60
++            }
++            val yearAdjust = when {
++                parsed.year == null || years == null -> 0
++                parsed.year in years.first..years.second -> 50
++                else -> -50
++            }
++            val asSpoken = nameScore(parsed.full, candidate)
++            val withHints = nameScore(parsed.title, candidate) + yearAdjust + typeAdjust
++            return maxOf(asSpoken, withHints)
++        }
+     }
+ }
+diff --git a/app/src/main/java/com/nuvio/tv/ui/screens/player/PlayerVoiceCommands.kt b/app/src/main/java/com/nuvio/tv/ui/screens/player/PlayerVoiceCommands.kt
+index a83f1df..b619fae 100644
+--- a/app/src/main/java/com/nuvio/tv/ui/screens/player/PlayerVoiceCommands.kt
++++ b/app/src/main/java/com/nuvio/tv/ui/screens/player/PlayerVoiceCommands.kt
+@@ -2,6 +2,7 @@ package com.nuvio.tv.ui.screens.player
+ 
+ import com.nuvio.tv.core.voice.VoiceCommand
+ import com.nuvio.tv.core.voice.VoiceResult
++import com.nuvio.tv.data.local.StreamAutoPlayMode
+ 
+ /**
+  * Maps Alexa voice commands onto the player's existing [PlayerEvent]s, so voice goes through
+@@ -52,13 +53,7 @@ internal fun PlayerViewModel.handleVoiceCommand(
+             }
+         }
+ 
+-        VoiceCommand.NextEpisode -> when {
+-            state.nextEpisode != null -> {
+-                onEvent(PlayerEvent.OnPlayNextEpisode)
+-                VoiceResult.ok("next_episode")
+-            }
+-            else -> VoiceResult.fail("no_next_episode")
+-        }
++        VoiceCommand.NextEpisode -> nextEpisode(state)
+ 
+         VoiceCommand.SkipIntro -> when {
+             state.activeSkipInterval != null -> {
+@@ -86,3 +81,29 @@ internal fun PlayerViewModel.handleVoiceCommand(
+         is VoiceCommand.Search -> VoiceResult.fail("stop_playback_first")
+     }
+ }
++
++/**
++ * Mirrors the early returns of PlayerRuntimeController.playNextEpisode, which otherwise fail
++ * silently, so Alexa can say why nothing happened instead of claiming success.
++ */
++private fun PlayerViewModel.nextEpisode(state: PlayerUiState): VoiceResult {
++    val next = state.nextEpisode
++    val autoPlay = state.postPlayMode as? PostPlayMode.AutoPlay
++    val settings = controller.currentPlayerSettingsForReport
++    // With Manual auto-play (and no "auto-play next episode" / binge-group preference) the
++    // player opens the next episode's source list instead of starting it.
++    val opensSourcePicker = settings.streamAutoPlayMode == StreamAutoPlayMode.MANUAL &&
++        !settings.streamAutoPlayNextEpisodeEnabled &&
++        !settings.streamAutoPlayPreferBingeGroupForNextEpisode
++    return when {
++        next == null || controller.nextEpisodeVideo == null -> VoiceResult.fail("no_next_episode")
++        !next.hasAired -> VoiceResult.fail("next_not_aired")
++        controller.isPartyControlLocked -> VoiceResult.fail("party_locked")
++        autoPlay != null && (autoPlay.searching || autoPlay.countdownSec != null) ->
++            VoiceResult.ok("next_episode_starting")
++        else -> {
++            onEvent(PlayerEvent.OnPlayNextEpisode)
++            if (opensSourcePicker) VoiceResult.ok("next_episode_pick_source") else VoiceResult.ok("next_episode")
++        }
++    }
++}
+-- 
+2.43.0
+
+
+From 9056ae450247f44fb3bd87f2c0b32e9e5c6a104a Mon Sep 17 00:00:00 2001
+From: Fabrizio Catitti <fabrizio.catitti@gmail.com>
+Date: Sat, 24 Oct 2026 15:49:23 +0200
+Subject: [PATCH 2/4] feat(voice): "play <title>" starts the first available
+ source
+
+VoiceAutoPlayRequest records the title opened by voice; the sources screen
+for that title consumes it once (2 min TTL) and, when Stream auto-play is
+Manual, loads with First stream / All sources. First stream and Regex
+settings are left as configured.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JQ7oit84w6xrrRhN57hYZw
+---
+ alexa/README.md                               |  2 +-
+ .../tv/core/voice/VoiceAutoPlayRequest.kt     | 69 +++++++++++++++++++
+ .../tv/core/voice/VoicePlayCoordinator.kt     |  8 ++-
+ .../screens/stream/StreamScreenViewModel.kt   | 12 +++-
+ 4 files changed, 87 insertions(+), 4 deletions(-)
+ create mode 100644 app/src/main/java/com/nuvio/tv/core/voice/VoiceAutoPlayRequest.kt
+
+diff --git a/alexa/README.md b/alexa/README.md
+index faf0e1a..85faaa6 100644
+--- a/alexa/README.md
++++ b/alexa/README.md
+@@ -31,7 +31,7 @@ or with the app in the background.
+ | mettere il prossimo episodio | next episode (series). With Stream auto-play on Manual this opens the next episode's source list, same as the remote button |
+ | saltare l'intro / la sigla / il riassunto | skip the active intro or recap |
+ | chiudere il video | exit the player |
+-| voglio vedere *titolo* (say it after "Alexa, apri home tv"). Add a year or the type to pick between same-name titles: "voglio vedere dune del 2021", "voglio vedere il film dune", "voglio vedere la serie the office" | find the title and start it (stops the current video first): series resume where you left off; sources follow your Stream auto-play setting (Manual = you pick) |
++| voglio vedere *titolo* (say it after "Alexa, apri home tv"). Add a year or the type to pick between same-name titles: "voglio vedere dune del 2021", "voglio vedere il film dune", "voglio vedere la serie the office". Starts the first available source even if Stream auto-play is Manual | find the title and start it (stops the current video first): series resume where you left off; sources follow your Stream auto-play setting (Manual = you pick) |
+ | cercare *titolo* | open Search with the query (only when no video is playing) |
+ 
+ English, after "ask home tv to…": play *title* · pause · resume · skip forward 30 seconds · go back 2 minutes ·
+diff --git a/app/src/main/java/com/nuvio/tv/core/voice/VoiceAutoPlayRequest.kt b/app/src/main/java/com/nuvio/tv/core/voice/VoiceAutoPlayRequest.kt
+new file mode 100644
+index 0000000..e78fd1f
+--- /dev/null
++++ b/app/src/main/java/com/nuvio/tv/core/voice/VoiceAutoPlayRequest.kt
+@@ -0,0 +1,69 @@
++package com.nuvio.tv.core.voice
++
++import android.os.SystemClock
++import com.nuvio.tv.data.local.PlayerSettings
++import com.nuvio.tv.data.local.StreamAutoPlayMode
++import com.nuvio.tv.data.local.StreamAutoPlaySource
++import javax.inject.Inject
++import javax.inject.Singleton
++
++/**
++ * "Play <title>" by voice should start the first available source even when the user's
++ * Stream auto-play setting is Manual (there is no remote in hand to pick one).
++ *
++ * The voice coordinator records the title it opened; the sources screen for that title
++ * consumes the request once and, if the user's mode is Manual, loads with First stream /
++ * All sources instead. First stream and Regex modes are left as configured, since they
++ * already start on their own. Requests expire so a later manual visit isn't affected.
++ */
++@Singleton
++class VoiceAutoPlayRequest @Inject constructor() {
++
++    private data class Pending(val metaId: String, val atMs: Long)
++
++    @Volatile private var pending: Pending? = null
++
++    /** [metaId]: the movie or show id that was opened (episode ids share its prefix). */
++    fun request(metaId: String) {
++        pending = Pending(metaId, now())
++    }
++
++    /**
++     * True once if the sources screen for [contentId] / [videoId] was opened by voice in the
++     * last [TTL_MS]. Clears the request either way when it matches.
++     */
++    @Synchronized
++    fun consume(contentId: String?, videoId: String): Boolean {
++        val request = pending ?: return false
++        if (now() - request.atMs > TTL_MS) {
++            pending = null
++            return false
++        }
++        val matches = contentId == request.metaId ||
++            videoId == request.metaId ||
++            videoId.startsWith("${request.metaId}:")
++        if (matches) pending = null
++        return matches
++    }
++
++    internal var clock: () -> Long = { SystemClock.elapsedRealtime() }
++    private fun now() = clock()
++
++    companion object {
++        /** Detail metadata + next-episode lookup normally takes a few seconds. */
++        const val TTL_MS = 120_000L
++
++        /** The settings the sources screen should use for a voice-started title. */
++        fun forVoice(settings: PlayerSettings): PlayerSettings =
++            if (settings.streamAutoPlayMode != StreamAutoPlayMode.MANUAL) {
++                settings
++            } else {
++                settings.copy(
++                    streamAutoPlayMode = StreamAutoPlayMode.FIRST_STREAM,
++                    streamAutoPlaySource = StreamAutoPlaySource.ALL_SOURCES,
++                    streamAutoPlaySelectedAddons = emptySet(),
++                    streamAutoPlaySelectedPlugins = emptySet(),
++                )
++            }
++    }
++}
+diff --git a/app/src/main/java/com/nuvio/tv/core/voice/VoicePlayCoordinator.kt b/app/src/main/java/com/nuvio/tv/core/voice/VoicePlayCoordinator.kt
+index 6b65862..07933c6 100644
+--- a/app/src/main/java/com/nuvio/tv/core/voice/VoicePlayCoordinator.kt
++++ b/app/src/main/java/com/nuvio/tv/core/voice/VoicePlayCoordinator.kt
+@@ -10,14 +10,16 @@ import javax.inject.Singleton
+  *  1. ask the screens whether a title may be opened right now (the app refuses before
+  *     onboarding is done; the player answers "ready while playing" and keeps playing);
+  *  2. resolve the spoken title against the addon catalogs;
+- *  3. open it with play-on-load (series resume from watch progress, sources follow the user's
+- *     stream auto-play setting). If a video is playing, the player exits first.
++ *  3. open it with play-on-load (series resume from watch progress). The sources screen then
++ *     starts the first available source, even if Stream auto-play is Manual
++ *     ([VoiceAutoPlayRequest]). If a video is playing, the player exits first.
+  * No match: open the Search screen, or, if a video is playing, leave it playing.
+  */
+ @Singleton
+ class VoicePlayCoordinator @Inject constructor(
+     private val bus: VoiceCommandBus,
+     private val resolver: VoiceTitleResolver,
++    private val autoPlayRequest: VoiceAutoPlayRequest,
+ ) {
+     suspend fun play(query: String): VoiceResult {
+         val precheck = bus.dispatch(VoiceCommand.Play(query))
+@@ -34,6 +36,8 @@ class VoicePlayCoordinator @Inject constructor(
+             return if (search.ok) VoiceResult.fail("not_found_searching") else search
+         }
+ 
++        // Before navigating: the sources screen is created later and checks for this.
++        autoPlayRequest.request(match.id)
+         val opened = bus.dispatch(match)
+         val spokenTitle = match.year?.let { "${match.name} ($it)" } ?: match.name
+         return if (opened.ok) opened.copy(title = spokenTitle) else opened
+diff --git a/app/src/main/java/com/nuvio/tv/ui/screens/stream/StreamScreenViewModel.kt b/app/src/main/java/com/nuvio/tv/ui/screens/stream/StreamScreenViewModel.kt
+index 87847d3..c7c29c5 100644
+--- a/app/src/main/java/com/nuvio/tv/ui/screens/stream/StreamScreenViewModel.kt
++++ b/app/src/main/java/com/nuvio/tv/ui/screens/stream/StreamScreenViewModel.kt
+@@ -103,6 +103,7 @@ class StreamScreenViewModel @Inject constructor(
+     private val torrentService: TorrentService,
+     private val serverStreams: ServerStreams,
+     private val serverPlayback: ServerPlayback,
++    voiceAutoPlayRequest: com.nuvio.tv.core.voice.VoiceAutoPlayRequest,
+     party: com.nuvio.tv.core.party.PartyRepository,
+     profileManager: com.nuvio.tv.core.profile.ProfileManager,
+     savedStateHandle: SavedStateHandle
+@@ -150,6 +151,9 @@ class StreamScreenViewModel @Inject constructor(
+     private val manualSelection: Boolean = savedStateHandle.get<String>("manualSelection")
+         ?.toBooleanStrictOrNull()
+         ?: false
++    // Opened by "play <title>" over Alexa: start the first source even in Manual mode.
++    private val voiceStartedPlayback: Boolean =
++        !manualSelection && voiceAutoPlayRequest.consume(contentId, videoId)
+     private val streamCacheKey: String = "${contentType.lowercase()}|$videoId"
+     private val partyKey: String = com.nuvio.tv.core.party.partyMediaKey(
+         metaType = contentType,
+@@ -400,7 +404,13 @@ class StreamScreenViewModel @Inject constructor(
+         streamLoadScope = newScope
+         streamLoadJob = newScope.launch {
+             streamLoadCompleted = false
+-            val playerSettings = playerSettingsDataStore.playerSettings.first()
++            val playerSettings = playerSettingsDataStore.playerSettings.first().let { settings ->
++                if (voiceStartedPlayback) {
++                    com.nuvio.tv.core.voice.VoiceAutoPlayRequest.forVoice(settings)
++                } else {
++                    settings
++                }
++            }
+             if (manualSelection) {
+                 directAutoPlayModeInitializedForSession = true
+                 directAutoPlayFlowEnabledForSession = false
+-- 
+2.43.0
+
+
+From 9ecb7d549ec036c5a5684e7b6fb55d219386239f Mon Sep 17 00:00:00 2001
+From: Fabrizio Catitti <fabrizio.catitti@gmail.com>
+Date: Sat, 24 Oct 2026 15:52:30 +0200
+Subject: [PATCH 3/4] feat(voice): remote arrows and select by voice
+
+- "key" command (up/down/left/right/select, repeat 1-10) injected into
+  MainActivity as real D-pad presses, 150 ms apart, so focus behaves exactly
+  like the remote (in the player too)
+- DirezioneIntent (DIREZIONE slot + optional count) and SelezionaIntent in
+  it-IT / en-US / en-GB models
+- Successful key presses reply silently and keep the session open for
+  wake-word-free navigation
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JQ7oit84w6xrrRhN57hYZw
+---
+ alexa/README.md                               |   3 +-
+ alexa/relay-worker/src/index.ts               |   4 +-
+ alexa/relay-worker/src/intents.ts             |  63 ++++++++++-
+ alexa/skill/interaction-model.en-GB.json      |  86 +++++++++++++-
+ alexa/skill/interaction-model.en-US.json      |  86 +++++++++++++-
+ alexa/skill/interaction-model.it-IT.json      | 107 +++++++++++++++++-
+ .../main/java/com/nuvio/tv/MainActivity.kt    |  20 ++++
+ .../com/nuvio/tv/core/voice/VoiceCommand.kt   |  22 ++++
+ .../ui/screens/player/PlayerVoiceCommands.kt  |   4 +
+ 9 files changed, 385 insertions(+), 10 deletions(-)
+
+diff --git a/alexa/README.md b/alexa/README.md
+index 85faaa6..9a3b0a0 100644
+--- a/alexa/README.md
++++ b/alexa/README.md
+@@ -33,8 +33,9 @@ or with the app in the background.
+ | chiudere il video | exit the player |
+ | voglio vedere *titolo* (say it after "Alexa, apri home tv"). Add a year or the type to pick between same-name titles: "voglio vedere dune del 2021", "voglio vedere il film dune", "voglio vedere la serie the office". Starts the first available source even if Stream auto-play is Manual | find the title and start it (stops the current video first): series resume where you left off; sources follow your Stream auto-play setting (Manual = you pick) |
+ | cercare *titolo* | open Search with the query (only when no video is playing) |
++| su · giù · sinistra · destra (optionally "giù 3 volte", "destra di 2") · ok / seleziona / clicca | press the remote's arrows / OK, anywhere in the app (in the player: left/right seek, like the remote). Alexa stays listening silently, so keep going without the wake word: "giù", "giù", "ok". Say "stop" to finish |
+ 
+-English, after "ask home tv to…": play *title* · pause · resume · skip forward 30 seconds · go back 2 minutes ·
++English, after "ask home tv to…": play *title* · up / down / left / right (· "down 3 times") · select / ok · pause · resume · skip forward 30 seconds · go back 2 minutes ·
+ go to minute 20 · go to 1 hour and 5 minutes · play the next episode · skip the intro / recap ·
+ close the video · search for *title*.
+ 
+diff --git a/alexa/relay-worker/src/index.ts b/alexa/relay-worker/src/index.ts
+index 04cd3f8..e408df7 100644
+--- a/alexa/relay-worker/src/index.ts
++++ b/alexa/relay-worker/src/index.ts
+@@ -9,7 +9,7 @@
+  */
+ 
+ import { AlexaVerificationError, verifyAlexaRequest } from "./alexa-verify";
+-import { langOf, mapRequest, say, speakResult, type TvCommand, type TvReply } from "./intents";
++import { langOf, mapRequest, respond, type TvCommand, type TvReply } from "./intents";
+ 
+ export interface Env {
+   RELAY: DurableObjectNamespace;
+@@ -74,7 +74,7 @@ async function handleAlexa(request: Request, env: Env): Promise<Response> {
+     reply = { ok: false, code: "error" };
+   }
+   console.log(`tv reply: ${JSON.stringify(reply)}`);
+-  return Response.json(say(speakResult(outcome.command, reply, lang)));
++  return Response.json(respond(outcome.command, reply, lang));
+ }
+ 
+ async function handleTv(request: Request, env: Env): Promise<Response> {
+diff --git a/alexa/relay-worker/src/intents.ts b/alexa/relay-worker/src/intents.ts
+index dae3767..7a93b32 100644
+--- a/alexa/relay-worker/src/intents.ts
++++ b/alexa/relay-worker/src/intents.ts
+@@ -14,7 +14,11 @@ export type TvCommand =
+   | { cmd: "skip_intro" }
+   | { cmd: "stop" }
+   | { cmd: "search"; query: string }
+-  | { cmd: "play"; query: string };
++  | { cmd: "play"; query: string }
++  | { cmd: "key"; key: RemoteKey; count: number };
++
++export type RemoteKey = "up" | "down" | "left" | "right" | "select";
++const MAX_KEY_REPEAT = 10;
+ 
+ export interface TvReply {
+   ok: boolean;
+@@ -34,7 +38,36 @@ export interface AlexaResponse {
+ 
+ export type Lang = "it" | "en";
+ 
+-type Slots = Record<string, { value?: string } | undefined>;
++interface Slot {
++  value?: string;
++  resolutions?: {
++    resolutionsPerAuthority?: { status?: { code?: string }; values?: { value?: { id?: string } }[] }[];
++  };
++}
++type Slots = Record<string, Slot | undefined>;
++
++/** Words Alexa may hand back for the DIREZIONE slot when entity resolution has no id. */
++const DIRECTION_WORDS: Record<string, RemoteKey> = {
++  su: "up", sopra: "up", alto: "up", "in alto": "up", up: "up",
++  giu: "down", "giù": "down", sotto: "down", basso: "down", "in basso": "down", down: "down",
++  sinistra: "left", "a sinistra": "left", left: "left",
++  destra: "right", "a destra": "right", right: "right",
++};
++
++/** Canonical id of a custom-slot value (entity resolution first, then the raw words). */
++export function directionOf(slot: Slot | undefined): RemoteKey | null {
++  const resolved = slot?.resolutions?.resolutionsPerAuthority
++    ?.find((a) => a.status?.code === "ER_SUCCESS_MATCH")
++    ?.values?.[0]?.value?.id;
++  if (resolved === "up" || resolved === "down" || resolved === "left" || resolved === "right") return resolved;
++  const raw = slot?.value?.trim().toLowerCase();
++  return raw ? DIRECTION_WORDS[raw] ?? null : null;
++}
++
++function repeatCount(slot: Slot | undefined): number {
++  const n = Math.round(Number(slot?.value));
++  return Number.isFinite(n) && n >= 1 ? Math.min(n, MAX_KEY_REPEAT) : 1;
++}
+ 
+ const DEFAULT_SEEK_FORWARD_MS = 30_000;
+ const DEFAULT_SEEK_BACK_MS = 10_000;
+@@ -55,7 +88,7 @@ const T = {
+     help:
+       "Puoi dire: voglio vedere seguito da un titolo, metti in pausa, riprendi, vai avanti di trenta secondi, " +
+       "torna indietro di un minuto, vai al minuto venti, prossimo episodio, salta l'intro, chiudi il video, " +
+-      "oppure cerca seguito da un titolo.",
++      "oppure cerca seguito da un titolo. Per muoverti: su, giù, sinistra, destra e ok.",
+     ready: "Nuvio è pronto.",
+     whatNext: "Cosa vuoi fare?",
+     didntUnderstand: "Non ho capito.",
+@@ -64,6 +97,7 @@ const T = {
+     askMinuteReprompt: "Dimmi il minuto, per esempio vai al minuto venti.",
+     askQuery: "Cosa vuoi cercare?",
+     askQueryReprompt: "Dimmi il titolo da cercare.",
++    askDirection: "Su, giù, sinistra o destra?",
+     askPlay: "Cosa vuoi guardare?",
+     askPlayReprompt: "Dimmi il titolo, per esempio voglio vedere The Bear.",
+     done: "Fatto.",
+@@ -103,7 +137,8 @@ const T = {
+   en: {
+     help:
+       "You can say: play followed by a title, pause, resume, skip forward thirty seconds, go back one minute, " +
+-      "go to minute twenty, next episode, skip the intro, close the video, or search for followed by a title.",
++      "go to minute twenty, next episode, skip the intro, close the video, or search for followed by a title. " +
++      "To move around: up, down, left, right and select.",
+     ready: "Nuvio is ready.",
+     whatNext: "What would you like to do?",
+     didntUnderstand: "Sorry, I didn't get that.",
+@@ -112,6 +147,7 @@ const T = {
+     askMinuteReprompt: "Tell me the minute, for example go to minute twenty.",
+     askQuery: "What do you want to search for?",
+     askQueryReprompt: "Tell me the title to search for.",
++    askDirection: "Up, down, left or right?",
+     askPlay: "What do you want to watch?",
+     askPlayReprompt: "Tell me the title, for example play The Bear.",
+     done: "Done.",
+@@ -243,6 +279,13 @@ export function mapRequest(request: {
+       if (!query) return reply(say(t.askQuery, false, t.askQueryReprompt));
+       return cmd({ cmd: "search", query });
+     }
++    case "DirezioneIntent": {
++      const key = directionOf(slots.direzione);
++      if (!key) return reply(say(t.askDirection, false, t.askDirection));
++      return cmd({ cmd: "key", key, count: repeatCount(slots.volte) });
++    }
++    case "SelezionaIntent":
++      return cmd({ cmd: "key", key: "select", count: 1 });
+     case "GuardaIntent": {
+       const query = slots.titolo?.value?.trim();
+       if (!query) return reply(say(t.askPlay, false, t.askPlayReprompt));
+@@ -284,3 +327,15 @@ export function speakResult(command: TvCommand, result: TvReply, lang: Lang = "i
+       return t.codes[result.code] ?? (result.ok ? t.done : t.failed);
+   }
+ }
++
++/**
++ * The Alexa response for a TV reply. Key presses that worked answer silently and keep the
++ * microphone open, so navigation is "giù … giù … destra … ok" without repeating the wake word
++ * and skill name; everything else speaks the result and ends the session.
++ */
++export function respond(command: TvCommand, result: TvReply, lang: Lang): AlexaResponse {
++  if (command.cmd === "key" && result.ok) {
++    return { version: "1.0", response: { shouldEndSession: false } };
++  }
++  return say(speakResult(command, result, lang));
++}
+diff --git a/alexa/skill/interaction-model.en-GB.json b/alexa/skill/interaction-model.en-GB.json
+index fde5459..dcfc752 100644
+--- a/alexa/skill/interaction-model.en-GB.json
++++ b/alexa/skill/interaction-model.en-GB.json
+@@ -188,9 +188,93 @@
+           "samples": [
+             "play {titolo}"
+           ]
++        },
++        {
++          "name": "DirezioneIntent",
++          "slots": [
++            {
++              "name": "direzione",
++              "type": "DIREZIONE"
++            },
++            {
++              "name": "volte",
++              "type": "AMAZON.NUMBER"
++            }
++          ],
++          "samples": [
++            "{direzione}",
++            "go {direzione}",
++            "move {direzione}",
++            "press {direzione}",
++            "{direzione} {volte} times",
++            "go {direzione} {volte} times",
++            "move {direzione} {volte} times",
++            "press {direzione} {volte} times",
++            "{direzione} {volte}",
++            "go {direzione} {volte}"
++          ]
++        },
++        {
++          "name": "SelezionaIntent",
++          "slots": [],
++          "samples": [
++            "select",
++            "ok",
++            "okay",
++            "click",
++            "press ok",
++            "press select",
++            "enter",
++            "press enter",
++            "confirm",
++            "click it",
++            "select it"
++          ]
+         }
+       ],
+-      "types": []
++      "types": [
++        {
++          "name": "DIREZIONE",
++          "values": [
++            {
++              "id": "up",
++              "name": {
++                "value": "up",
++                "synonyms": [
++                  "upwards"
++                ]
++              }
++            },
++            {
++              "id": "down",
++              "name": {
++                "value": "down",
++                "synonyms": [
++                  "downwards"
++                ]
++              }
++            },
++            {
++              "id": "left",
++              "name": {
++                "value": "left",
++                "synonyms": [
++                  "to the left"
++                ]
++              }
++            },
++            {
++              "id": "right",
++              "name": {
++                "value": "right",
++                "synonyms": [
++                  "to the right"
++                ]
++              }
++            }
++          ]
++        }
++      ]
+     }
+   }
+ }
+diff --git a/alexa/skill/interaction-model.en-US.json b/alexa/skill/interaction-model.en-US.json
+index fde5459..dcfc752 100644
+--- a/alexa/skill/interaction-model.en-US.json
++++ b/alexa/skill/interaction-model.en-US.json
+@@ -188,9 +188,93 @@
+           "samples": [
+             "play {titolo}"
+           ]
++        },
++        {
++          "name": "DirezioneIntent",
++          "slots": [
++            {
++              "name": "direzione",
++              "type": "DIREZIONE"
++            },
++            {
++              "name": "volte",
++              "type": "AMAZON.NUMBER"
++            }
++          ],
++          "samples": [
++            "{direzione}",
++            "go {direzione}",
++            "move {direzione}",
++            "press {direzione}",
++            "{direzione} {volte} times",
++            "go {direzione} {volte} times",
++            "move {direzione} {volte} times",
++            "press {direzione} {volte} times",
++            "{direzione} {volte}",
++            "go {direzione} {volte}"
++          ]
++        },
++        {
++          "name": "SelezionaIntent",
++          "slots": [],
++          "samples": [
++            "select",
++            "ok",
++            "okay",
++            "click",
++            "press ok",
++            "press select",
++            "enter",
++            "press enter",
++            "confirm",
++            "click it",
++            "select it"
++          ]
+         }
+       ],
+-      "types": []
++      "types": [
++        {
++          "name": "DIREZIONE",
++          "values": [
++            {
++              "id": "up",
++              "name": {
++                "value": "up",
++                "synonyms": [
++                  "upwards"
++                ]
++              }
++            },
++            {
++              "id": "down",
++              "name": {
++                "value": "down",
++                "synonyms": [
++                  "downwards"
++                ]
++              }
++            },
++            {
++              "id": "left",
++              "name": {
++                "value": "left",
++                "synonyms": [
++                  "to the left"
++                ]
++              }
++            },
++            {
++              "id": "right",
++              "name": {
++                "value": "right",
++                "synonyms": [
++                  "to the right"
++                ]
++              }
++            }
++          ]
++        }
++      ]
+     }
+   }
+ }
+diff --git a/alexa/skill/interaction-model.it-IT.json b/alexa/skill/interaction-model.it-IT.json
+index 46b1506..b8d06b2 100644
+--- a/alexa/skill/interaction-model.it-IT.json
++++ b/alexa/skill/interaction-model.it-IT.json
+@@ -210,9 +210,114 @@
+           "samples": [
+             "voglio vedere {titolo}"
+           ]
++        },
++        {
++          "name": "DirezioneIntent",
++          "slots": [
++            {
++              "name": "direzione",
++              "type": "DIREZIONE"
++            },
++            {
++              "name": "volte",
++              "type": "AMAZON.NUMBER"
++            }
++          ],
++          "samples": [
++            "{direzione}",
++            "vai {direzione}",
++            "andare {direzione}",
++            "sposta {direzione}",
++            "spostare {direzione}",
++            "spostati {direzione}",
++            "spostarti {direzione}",
++            "premi {direzione}",
++            "premere {direzione}",
++            "freccia {direzione}",
++            "{direzione} {volte} volte",
++            "vai {direzione} {volte} volte",
++            "andare {direzione} {volte} volte",
++            "sposta {direzione} {volte} volte",
++            "spostare {direzione} {volte} volte",
++            "premi {direzione} {volte} volte",
++            "premere {direzione} {volte} volte",
++            "{direzione} di {volte}",
++            "vai {direzione} di {volte}",
++            "andare {direzione} di {volte}"
++          ]
++        },
++        {
++          "name": "SelezionaIntent",
++          "slots": [],
++          "samples": [
++            "ok",
++            "okay",
++            "seleziona",
++            "selezionare",
++            "conferma",
++            "confermare",
++            "clicca",
++            "cliccare",
++            "premi ok",
++            "premere ok",
++            "invio",
++            "premi invio",
++            "premere invio"
++          ]
+         }
+       ],
+-      "types": []
++      "types": [
++        {
++          "name": "DIREZIONE",
++          "values": [
++            {
++              "id": "up",
++              "name": {
++                "value": "su",
++                "synonyms": [
++                  "sopra",
++                  "in alto",
++                  "alto",
++                  "in su"
++                ]
++              }
++            },
++            {
++              "id": "down",
++              "name": {
++                "value": "giù",
++                "synonyms": [
++                  "sotto",
++                  "in basso",
++                  "basso",
++                  "giu",
++                  "in giù"
++                ]
++              }
++            },
++            {
++              "id": "left",
++              "name": {
++                "value": "sinistra",
++                "synonyms": [
++                  "a sinistra",
++                  "verso sinistra"
++                ]
++              }
++            },
++            {
++              "id": "right",
++              "name": {
++                "value": "destra",
++                "synonyms": [
++                  "a destra",
++                  "verso destra"
++                ]
++              }
++            }
++          ]
++        }
++      ]
+     }
+   }
+ }
+diff --git a/app/src/main/java/com/nuvio/tv/MainActivity.kt b/app/src/main/java/com/nuvio/tv/MainActivity.kt
+index ddcf32e..22a8c29 100644
+--- a/app/src/main/java/com/nuvio/tv/MainActivity.kt
++++ b/app/src/main/java/com/nuvio/tv/MainActivity.kt
+@@ -266,6 +266,8 @@ private data class MainUiPrefs(
+     val alwaysBackdropWithLogo: Boolean = false
+ )
+ 
++private const val VOICE_KEY_REPEAT_DELAY_MS = 150L
++
+ @AndroidEntryPoint
+ open class MainActivity : ComponentActivity() {
+ 
+@@ -1011,6 +1013,17 @@ open class MainActivity : ComponentActivity() {
+                                         com.nuvio.tv.core.voice.VoiceResult.ok("searching")
+                                     }
+                                 }
++                                // Remote-control keys: injected into this activity like real
++                                // D-pad presses, spaced out so focus (and lazy lists) can follow.
++                                is com.nuvio.tv.core.voice.VoiceCommand.Key -> {
++                                    lifecycleScope.launch {
++                                        repeat(command.count) { index ->
++                                            if (index > 0) delay(VOICE_KEY_REPEAT_DELAY_MS)
++                                            sendVoiceKey(command.key.keyCode)
++                                        }
++                                    }
++                                    com.nuvio.tv.core.voice.VoiceResult.ok("key_sent")
++                                }
+                                 // Precheck for "play <title>": the coordinator resolves the
+                                 // title only once a screen has agreed it can be opened.
+                                 is com.nuvio.tv.core.voice.VoiceCommand.Play -> {
+@@ -1364,6 +1377,13 @@ open class MainActivity : ComponentActivity() {
+         }
+     }
+ 
++    /** Delivers a down/up pair through the normal key path (focus, BackHandlers, idle wake-up). */
++    private fun sendVoiceKey(keyCode: Int) {
++        val now = android.os.SystemClock.uptimeMillis()
++        dispatchKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_DOWN, keyCode, 0))
++        dispatchKeyEvent(KeyEvent(now, android.os.SystemClock.uptimeMillis(), KeyEvent.ACTION_UP, keyCode, 0))
++    }
++
+     override fun onNewIntent(intent: Intent) {
+         super.onNewIntent(intent)
+         setIntent(intent)
+diff --git a/app/src/main/java/com/nuvio/tv/core/voice/VoiceCommand.kt b/app/src/main/java/com/nuvio/tv/core/voice/VoiceCommand.kt
+index 11c6865..ae334f1 100644
+--- a/app/src/main/java/com/nuvio/tv/core/voice/VoiceCommand.kt
++++ b/app/src/main/java/com/nuvio/tv/core/voice/VoiceCommand.kt
+@@ -10,6 +10,7 @@ import org.json.JSONObject
+  *   {"id":"<uuid>","cmd":"seek_by","ms":-30000}
+  *   {"id":"<uuid>","cmd":"search","query":"the bear"}
+  *   {"id":"<uuid>","cmd":"play","query":"the bear"}
++ *   {"id":"<uuid>","cmd":"key","key":"down","count":3}
+  *
+  * Reply (TV -> relay): {"id":"<uuid>","ok":true,"code":"paused"}
+  * ("play" replies also carry "title": the name of the title that was opened.)
+@@ -24,6 +25,9 @@ sealed interface VoiceCommand {
+     data object Stop : VoiceCommand
+     data class Search(val query: String) : VoiceCommand
+ 
++    /** Remote-control key press(es): D-pad arrows or select (OK). */
++    data class Key(val key: RemoteKey, val count: Int = 1) : VoiceCommand
++
+     /** Find a title by name and start it (series resume from watch progress). */
+     data class Play(val query: String) : VoiceCommand
+ 
+@@ -40,6 +44,8 @@ sealed interface VoiceCommand {
+     ) : VoiceCommand
+ 
+     companion object {
++        const val MAX_KEY_REPEAT = 10
++
+         fun fromJson(json: JSONObject): VoiceCommand? = when (json.optString("cmd")) {
+             "pause" -> Pause
+             "resume" -> Resume
+@@ -50,11 +56,27 @@ sealed interface VoiceCommand {
+             "stop" -> Stop
+             "search" -> json.optString("query").trim().takeIf { it.isNotEmpty() }?.let(::Search)
+             "play" -> json.optString("query").trim().takeIf { it.isNotEmpty() }?.let(::Play)
++            "key" -> RemoteKey.fromWire(json.optString("key"))?.let { key ->
++                Key(key, json.optInt("count", 1).coerceIn(1, MAX_KEY_REPEAT))
++            }
+             else -> null
+         }
+     }
+ }
+ 
++/** Keys a voice command can press, with their Android key codes. */
++enum class RemoteKey(val wire: String, val keyCode: Int) {
++    UP("up", android.view.KeyEvent.KEYCODE_DPAD_UP),
++    DOWN("down", android.view.KeyEvent.KEYCODE_DPAD_DOWN),
++    LEFT("left", android.view.KeyEvent.KEYCODE_DPAD_LEFT),
++    RIGHT("right", android.view.KeyEvent.KEYCODE_DPAD_RIGHT),
++    SELECT("select", android.view.KeyEvent.KEYCODE_DPAD_CENTER);
++
++    companion object {
++        fun fromWire(value: String): RemoteKey? = entries.firstOrNull { it.wire == value }
++    }
++}
++
+ /**
+  * Outcome of a command. [code] is a stable machine-readable string; the relay maps it to
+  * the spoken reply (Italian or English), so the app never has to localize Alexa responses.
+diff --git a/app/src/main/java/com/nuvio/tv/ui/screens/player/PlayerVoiceCommands.kt b/app/src/main/java/com/nuvio/tv/ui/screens/player/PlayerVoiceCommands.kt
+index b619fae..14dfb10 100644
+--- a/app/src/main/java/com/nuvio/tv/ui/screens/player/PlayerVoiceCommands.kt
++++ b/app/src/main/java/com/nuvio/tv/ui/screens/player/PlayerVoiceCommands.kt
+@@ -77,6 +77,10 @@ internal fun PlayerViewModel.handleVoiceCommand(
+             null
+         }
+ 
++        // Key presses behave exactly like the remote, in the player too (left/right seek,
++        // up/down/select show the controls), so the app-level handler sends them.
++        is VoiceCommand.Key -> null
++
+         // Search has no "go back to what I was watching" path, so ask the user to stop first.
+         is VoiceCommand.Search -> VoiceResult.fail("stop_playback_first")
+     }
+-- 
+2.43.0
+
+
 From f79a413cfea771a354b6d8f2ab47bb9fdd181b72 Mon Sep 17 00:00:00 2001
 From: Fabrizio Catitti <fabrizio.catitti@gmail.com>
 Date: Sat, 24 Oct 2026 16:09:31 +0200
-Subject: [PATCH] feat(voice): Back command
+Subject: [PATCH 4/4] feat(voice): Back command
 
 - RemoteKey.BACK, sent as a real Back press (falls back to the
   OnBackPressedDispatcher if nothing handles the injected key)
