@@ -54,6 +54,7 @@ import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.compositionLocalOf
@@ -327,6 +328,12 @@ open class MainActivity : ComponentActivity() {
 
     @Inject
     lateinit var partyRepository: PartyRepository
+
+    @Inject
+    lateinit var voiceCommandBus: com.nuvio.tv.core.voice.VoiceCommandBus
+
+    @Inject
+    lateinit var voiceCommandClient: com.nuvio.tv.core.voice.VoiceCommandClient
 
     private val pendingDeepLinkUrl = MutableStateFlow<String?>(null)
     private val pendingLaunchIntent = MutableStateFlow<Intent?>(null)
@@ -987,6 +994,29 @@ open class MainActivity : ComponentActivity() {
                         }
                     }
 
+                    // Alexa voice control fallback handler (lowest priority): anything the
+                    // player didn't claim lands here. Search navigates; player commands report
+                    // that nothing is playing.
+                    DisposableEffect(navController, layoutChosen) {
+                        val unregister = voiceCommandBus.register(com.nuvio.tv.core.voice.VoiceCommandBus.PRIORITY_APP) { command ->
+                            when (command) {
+                                is com.nuvio.tv.core.voice.VoiceCommand.Search -> {
+                                    if (!layoutChosen) {
+                                        com.nuvio.tv.core.voice.VoiceResult.fail("not_ready")
+                                    } else {
+                                        voiceCommandBus.requestSearch(command.query)
+                                        navController.navigate(Screen.Search.route) {
+                                            launchSingleTop = true
+                                        }
+                                        com.nuvio.tv.core.voice.VoiceResult.ok("searching")
+                                    }
+                                }
+                                else -> com.nuvio.tv.core.voice.VoiceResult.fail("nothing_playing")
+                            }
+                        }
+                        onDispose { unregister() }
+                    }
+
                     LaunchedEffect(navController, layoutChosen, pendingDeepLink) {
                         val url = pendingDeepLink ?: return@LaunchedEffect
                         if (!layoutChosen) return@LaunchedEffect
@@ -1377,12 +1407,14 @@ open class MainActivity : ComponentActivity() {
         super.onStart()
         startupSyncService.startPeriodicSurfacePulls()
         androidTvChannelSyncService.onForegroundChanged(true)
+        voiceCommandClient.start()
     }
 
     override fun onStop() {
         externalPlaybackTracker.onExternalPlayerCoveredApp()
         super.onStop()
         startupSyncService.stopPeriodicSurfacePulls()
+        voiceCommandClient.stop()
         // App going to background (e.g. user returning to the launcher): reconcile the
         // Continue Watching channel once so Projectivy repaints it with fresh progress.
         androidTvChannelSyncService.onForegroundChanged(false)

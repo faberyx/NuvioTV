@@ -265,6 +265,14 @@ fun PlayerScreen(
             completed
         )
     }
+    // Alexa voice control: the player gets first pick of incoming commands while on screen.
+    val latestExitPlayer by rememberUpdatedState(exitPlayer)
+    DisposableEffect(viewModel) {
+        val unregister = viewModel.voiceCommandBus.register(com.nuvio.tv.core.voice.VoiceCommandBus.PRIORITY_PLAYER) { command ->
+            viewModel.handleVoiceCommand(command, exitPlayer = { latestExitPlayer() })
+        }
+        onDispose { unregister() }
+    }
     val exitPlayerFromError: () -> Unit = exitPlayerFromError@{
         if (exitDispatched) return@exitPlayerFromError
         exitDispatched = true

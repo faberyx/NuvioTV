@@ -59,6 +59,7 @@ class SearchViewModel @Inject constructor(
     private val watchedSeriesStateHolder: com.nuvio.tv.data.local.WatchedSeriesStateHolder,
     val posterOptions: com.nuvio.tv.ui.components.posteroptions.PosterOptionsController,
     private val serverCatalog: ServerCatalog,
+    private val voiceCommandBus: com.nuvio.tv.core.voice.VoiceCommandBus,
     @ApplicationContext private val context: Context
 ) : ViewModel() {
 
@@ -119,6 +120,15 @@ class SearchViewModel @Inject constructor(
 
     init {
         posterOptions.bind(viewModelScope)
+        // Alexa "cerca <titolo>": fill the field and submit, exactly like typing + Done.
+        viewModelScope.launch {
+            voiceCommandBus.pendingSearchQuery.collect { query ->
+                if (query == null) return@collect
+                onEvent(SearchEvent.QueryChanged(query))
+                onEvent(SearchEvent.SubmitSearch)
+                voiceCommandBus.consumeSearch(query)
+            }
+        }
         viewModelScope.launch {
             watchProgressRepository.observeWatchedMovieIds()
                 .collect { ids -> _watchedMovieIds.value = ids }

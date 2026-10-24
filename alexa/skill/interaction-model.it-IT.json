@@ -1,0 +1,206 @@
+{
+  "interactionModel": {
+    "languageModel": {
+      "invocationName": "nuvio tv",
+      "intents": [
+        {
+          "name": "AMAZON.CancelIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.HelpIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.StopIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.NavigateHomeIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.FallbackIntent",
+          "samples": []
+        },
+        {
+          "name": "PausaIntent",
+          "slots": [],
+          "samples": [
+            "pausa",
+            "metti in pausa",
+            "metti pausa",
+            "mettere in pausa",
+            "fai una pausa",
+            "fare una pausa",
+            "pausa il video",
+            "metti in pausa il video",
+            "mettere in pausa il video",
+            "blocca il video",
+            "bloccare il video"
+          ]
+        },
+        {
+          "name": "RiprendiIntent",
+          "slots": [],
+          "samples": [
+            "riprendi",
+            "riprendere",
+            "continua",
+            "continuare",
+            "play",
+            "fai ripartire",
+            "far ripartire",
+            "riparti",
+            "ripartire",
+            "riprendi il video",
+            "riprendere il video",
+            "fai ripartire il video",
+            "far ripartire il video",
+            "togli la pausa",
+            "togliere la pausa"
+          ]
+        },
+        {
+          "name": "AvantiIntent",
+          "slots": [
+            {
+              "name": "durata",
+              "type": "AMAZON.DURATION"
+            }
+          ],
+          "samples": [
+            "avanti",
+            "vai avanti",
+            "andare avanti",
+            "avanti di {durata}",
+            "vai avanti di {durata}",
+            "andare avanti di {durata}",
+            "salta avanti di {durata}",
+            "saltare avanti di {durata}",
+            "porta avanti di {durata}",
+            "portare avanti di {durata}",
+            "manda avanti di {durata}",
+            "mandare avanti di {durata}"
+          ]
+        },
+        {
+          "name": "IndietroIntent",
+          "slots": [
+            {
+              "name": "durata",
+              "type": "AMAZON.DURATION"
+            }
+          ],
+          "samples": [
+            "indietro",
+            "torna indietro",
+            "tornare indietro",
+            "indietro di {durata}",
+            "torna indietro di {durata}",
+            "tornare indietro di {durata}",
+            "vai indietro di {durata}",
+            "andare indietro di {durata}",
+            "riavvolgi di {durata}",
+            "riavvolgere di {durata}",
+            "manda indietro di {durata}",
+            "mandare indietro di {durata}"
+          ]
+        },
+        {
+          "name": "VaiAlMinutoIntent",
+          "slots": [
+            {
+              "name": "minuti",
+              "type": "AMAZON.NUMBER"
+            },
+            {
+              "name": "ore",
+              "type": "AMAZON.NUMBER"
+            }
+          ],
+          "samples": [
+            "vai al minuto {minuti}",
+            "andare al minuto {minuti}",
+            "salta al minuto {minuti}",
+            "saltare al minuto {minuti}",
+            "portami al minuto {minuti}",
+            "portarmi al minuto {minuti}",
+            "riparti dal minuto {minuti}",
+            "ripartire dal minuto {minuti}",
+            "vai a {ore} ora e {minuti} minuti",
+            "vai a {ore} ore e {minuti} minuti",
+            "andare a {ore} ora e {minuti} minuti",
+            "andare a {ore} ore e {minuti} minuti"
+          ]
+        },
+        {
+          "name": "ProssimoEpisodioIntent",
+          "slots": [],
+          "samples": [
+            "prossimo episodio",
+            "episodio successivo",
+            "il prossimo episodio",
+            "metti il prossimo episodio",
+            "mettere il prossimo episodio",
+            "vai al prossimo episodio",
+            "andare al prossimo episodio",
+            "passa al prossimo episodio",
+            "passare al prossimo episodio",
+            "next"
+          ]
+        },
+        {
+          "name": "SaltaIntroIntent",
+          "slots": [],
+          "samples": [
+            "salta l'intro",
+            "saltare l'intro",
+            "salta la sigla",
+            "saltare la sigla",
+            "salta il riassunto",
+            "saltare il riassunto",
+            "salta i titoli",
+            "saltare i titoli",
+            "salta l'introduzione",
+            "saltare l'introduzione"
+          ]
+        },
+        {
+          "name": "ChiudiVideoIntent",
+          "slots": [],
+          "samples": [
+            "chiudi il video",
+            "chiudere il video",
+            "chiudi il player",
+            "chiudere il player",
+            "esci dal video",
+            "uscire dal video",
+            "interrompi la riproduzione",
+            "interrompere la riproduzione"
+          ]
+        },
+        {
+          "name": "CercaIntent",
+          "slots": [
+            {
+              "name": "titolo",
+              "type": "AMAZON.SearchQuery"
+            }
+          ],
+          "samples": [
+            "cerca {titolo}",
+            "cercare {titolo}",
+            "cercami {titolo}",
+            "trova {titolo}",
+            "trovare {titolo}",
+            "trovami {titolo}",
+            "fai una ricerca di {titolo}",
+            "fare una ricerca di {titolo}"
+          ]
+        }
+      ],
+      "types": []
+    }
+  }
+}
