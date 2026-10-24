@@ -51,18 +51,28 @@ async function handleAlexa(request: Request, env: Env): Promise<Response> {
   const appId: string | undefined =
     envelope?.context?.System?.application?.applicationId ?? envelope?.session?.application?.applicationId;
   if (!env.ALEXA_SKILL_ID || appId !== env.ALEXA_SKILL_ID) {
+    console.warn(`rejected alexa request: skill id mismatch (got ${appId ?? "none"}, expected ${env.ALEXA_SKILL_ID || "unset"})`);
     return new Response("forbidden", { status: 403 });
   }
 
+  const lang = langOf(envelope.request?.locale);
   const outcome = mapRequest(envelope.request ?? { type: "" });
+  console.log(`alexa ${envelope.request?.type} ${envelope.request?.intent?.name ?? ""} -> ${outcome.kind === "command" ? JSON.stringify(outcome.command) : "reply"}`);
   if (outcome.kind === "reply") return Response.json(outcome.response);
 
-  const res = await relay(env).fetch("https://relay/command", {
-    method: "POST",
-    body: JSON.stringify(outcome.command),
-  });
-  const reply = (await res.json()) as TvReply;
-  return Response.json(say(speakResult(outcome.command, reply, langOf(envelope.request?.locale))));
+  let reply: TvReply;
+  try {
+    const res = await relay(env).fetch("https://relay/command", {
+      method: "POST",
+      body: JSON.stringify(outcome.command),
+    });
+    reply = (await res.json()) as TvReply;
+  } catch (e) {
+    console.error("relay error:", e instanceof Error ? e.message : String(e));
+    reply = { ok: false, code: "error" };
+  }
+  console.log(`tv reply: ${JSON.stringify(reply)}`);
+  return Response.json(say(speakResult(outcome.command, reply, lang)));
 }
 
 async function handleTv(request: Request, env: Env): Promise<Response> {
