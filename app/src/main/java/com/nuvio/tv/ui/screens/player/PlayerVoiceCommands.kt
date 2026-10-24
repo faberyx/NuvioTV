@@ -2,6 +2,7 @@ package com.nuvio.tv.ui.screens.player
 
 import com.nuvio.tv.core.voice.VoiceCommand
 import com.nuvio.tv.core.voice.VoiceResult
+import com.nuvio.tv.data.local.StreamAutoPlayMode
 
 /**
  * Maps Alexa voice commands onto the player's existing [PlayerEvent]s, so voice goes through
@@ -52,13 +53,7 @@ internal fun PlayerViewModel.handleVoiceCommand(
             }
         }
 
-        VoiceCommand.NextEpisode -> when {
-            state.nextEpisode != null -> {
-                onEvent(PlayerEvent.OnPlayNextEpisode)
-                VoiceResult.ok("next_episode")
-            }
-            else -> VoiceResult.fail("no_next_episode")
-        }
+        VoiceCommand.NextEpisode -> nextEpisode(state)
 
         VoiceCommand.SkipIntro -> when {
             state.activeSkipInterval != null -> {
@@ -84,5 +79,31 @@ internal fun PlayerViewModel.handleVoiceCommand(
 
         // Search has no "go back to what I was watching" path, so ask the user to stop first.
         is VoiceCommand.Search -> VoiceResult.fail("stop_playback_first")
+    }
+}
+
+/**
+ * Mirrors the early returns of PlayerRuntimeController.playNextEpisode, which otherwise fail
+ * silently, so Alexa can say why nothing happened instead of claiming success.
+ */
+private fun PlayerViewModel.nextEpisode(state: PlayerUiState): VoiceResult {
+    val next = state.nextEpisode
+    val autoPlay = state.postPlayMode as? PostPlayMode.AutoPlay
+    val settings = controller.currentPlayerSettingsForReport
+    // With Manual auto-play (and no "auto-play next episode" / binge-group preference) the
+    // player opens the next episode's source list instead of starting it.
+    val opensSourcePicker = settings.streamAutoPlayMode == StreamAutoPlayMode.MANUAL &&
+        !settings.streamAutoPlayNextEpisodeEnabled &&
+        !settings.streamAutoPlayPreferBingeGroupForNextEpisode
+    return when {
+        next == null || controller.nextEpisodeVideo == null -> VoiceResult.fail("no_next_episode")
+        !next.hasAired -> VoiceResult.fail("next_not_aired")
+        controller.isPartyControlLocked -> VoiceResult.fail("party_locked")
+        autoPlay != null && (autoPlay.searching || autoPlay.countdownSec != null) ->
+            VoiceResult.ok("next_episode_starting")
+        else -> {
+            onEvent(PlayerEvent.OnPlayNextEpisode)
+            if (opensSourcePicker) VoiceResult.ok("next_episode_pick_source") else VoiceResult.ok("next_episode")
+        }
     }
 }

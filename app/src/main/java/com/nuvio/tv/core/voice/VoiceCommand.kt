@@ -36,6 +36,7 @@ sealed interface VoiceCommand {
         val type: String,
         val name: String,
         val addonBaseUrl: String?,
+        val year: Int? = null,
     ) : VoiceCommand
 
     companion object {

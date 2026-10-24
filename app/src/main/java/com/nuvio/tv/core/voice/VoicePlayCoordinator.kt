@@ -35,7 +35,8 @@ class VoicePlayCoordinator @Inject constructor(
         }
 
         val opened = bus.dispatch(match)
-        return if (opened.ok) opened.copy(title = match.name) else opened
+        val spokenTitle = match.year?.let { "${match.name} ($it)" } ?: match.name
+        return if (opened.ok) opened.copy(title = spokenTitle) else opened
     }
 
     private companion object {
