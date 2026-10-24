@@ -8,6 +8,7 @@ import org.json.JSONObject
  * Wire format (relay -> TV), one JSON object per WebSocket text frame:
  *   {"id":"<uuid>","cmd":"pause"}
  *   {"id":"<uuid>","cmd":"seek_by","ms":-30000}
+ *   {"id":"<uuid>","cmd":"seek_by","ms":-10000,"back_if_idle":true}   ("indietro" with no time)
  *   {"id":"<uuid>","cmd":"search","query":"the bear"}
  *   {"id":"<uuid>","cmd":"play","query":"the bear"}
  *   {"id":"<uuid>","cmd":"key","key":"down","count":3}
@@ -18,14 +19,18 @@ import org.json.JSONObject
 sealed interface VoiceCommand {
     data object Pause : VoiceCommand
     data object Resume : VoiceCommand
-    data class SeekBy(val deltaMs: Long) : VoiceCommand
+    /**
+     * [backIfIdle]: the user said just "indietro" / "go back". In the player that rewinds;
+     * with no video on screen it presses Back instead.
+     */
+    data class SeekBy(val deltaMs: Long, val backIfIdle: Boolean = false) : VoiceCommand
     data class SeekTo(val positionMs: Long) : VoiceCommand
     data object NextEpisode : VoiceCommand
     data object SkipIntro : VoiceCommand
     data object Stop : VoiceCommand
     data class Search(val query: String) : VoiceCommand
 
-    /** Remote-control key press(es): D-pad arrows or select (OK). */
+    /** Remote-control key press(es): D-pad arrows, select (OK) or Back. */
     data class Key(val key: RemoteKey, val count: Int = 1) : VoiceCommand
 
     /** Find a title by name and start it (series resume from watch progress). */
@@ -49,7 +54,9 @@ sealed interface VoiceCommand {
         fun fromJson(json: JSONObject): VoiceCommand? = when (json.optString("cmd")) {
             "pause" -> Pause
             "resume" -> Resume
-            "seek_by" -> json.optLong("ms", 0L).takeIf { it != 0L }?.let(::SeekBy)
+            "seek_by" -> json.optLong("ms", 0L).takeIf { it != 0L }?.let { ms ->
+                SeekBy(ms, backIfIdle = json.optBoolean("back_if_idle", false))
+            }
             "seek_to" -> json.optLong("ms", -1L).takeIf { it >= 0L }?.let(::SeekTo)
             "next_episode" -> NextEpisode
             "skip_intro" -> SkipIntro
@@ -70,7 +77,8 @@ enum class RemoteKey(val wire: String, val keyCode: Int) {
     DOWN("down", android.view.KeyEvent.KEYCODE_DPAD_DOWN),
     LEFT("left", android.view.KeyEvent.KEYCODE_DPAD_LEFT),
     RIGHT("right", android.view.KeyEvent.KEYCODE_DPAD_RIGHT),
-    SELECT("select", android.view.KeyEvent.KEYCODE_DPAD_CENTER);
+    SELECT("select", android.view.KeyEvent.KEYCODE_DPAD_CENTER),
+    BACK("back", android.view.KeyEvent.KEYCODE_BACK);
 
     companion object {
         fun fromWire(value: String): RemoteKey? = entries.firstOrNull { it.wire == value }

@@ -230,6 +230,20 @@
             "click it",
             "select it"
           ]
+        },
+        {
+          "name": "TastoIndietroIntent",
+          "slots": [],
+          "samples": [
+            "press back",
+            "back button",
+            "press the back button",
+            "previous screen",
+            "go to the previous screen",
+            "return",
+            "go back a screen",
+            "back out"
+          ]
         }
       ],
       "types": [

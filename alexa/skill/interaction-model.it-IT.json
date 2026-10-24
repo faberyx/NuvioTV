@@ -264,6 +264,24 @@
             "premi invio",
             "premere invio"
           ]
+        },
+        {
+          "name": "TastoIndietroIntent",
+          "slots": [],
+          "samples": [
+            "torna",
+            "tornare",
+            "tasto indietro",
+            "premi indietro",
+            "premere indietro",
+            "premi il tasto indietro",
+            "premere il tasto indietro",
+            "schermata precedente",
+            "torna alla schermata precedente",
+            "tornare alla schermata precedente",
+            "torna al menu",
+            "tornare al menu"
+          ]
         }
       ],
       "types": [

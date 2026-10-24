@@ -1024,6 +1024,16 @@ open class MainActivity : ComponentActivity() {
                                     }
                                     com.nuvio.tv.core.voice.VoiceResult.ok("key_sent")
                                 }
+                                // Plain "indietro" / "go back" with no video on screen: there is
+                                // nothing to rewind, so it means the Back button.
+                                is com.nuvio.tv.core.voice.VoiceCommand.SeekBy -> {
+                                    if (command.backIfIdle) {
+                                        lifecycleScope.launch { sendVoiceKey(KeyEvent.KEYCODE_BACK) }
+                                        com.nuvio.tv.core.voice.VoiceResult.ok("key_sent")
+                                    } else {
+                                        com.nuvio.tv.core.voice.VoiceResult.fail("nothing_playing")
+                                    }
+                                }
                                 // Precheck for "play <title>": the coordinator resolves the
                                 // title only once a screen has agreed it can be opened.
                                 is com.nuvio.tv.core.voice.VoiceCommand.Play -> {
@@ -1380,8 +1390,15 @@ open class MainActivity : ComponentActivity() {
     /** Delivers a down/up pair through the normal key path (focus, BackHandlers, idle wake-up). */
     private fun sendVoiceKey(keyCode: Int) {
         val now = android.os.SystemClock.uptimeMillis()
-        dispatchKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_DOWN, keyCode, 0))
-        dispatchKeyEvent(KeyEvent(now, android.os.SystemClock.uptimeMillis(), KeyEvent.ACTION_UP, keyCode, 0))
+        val downHandled = dispatchKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_DOWN, keyCode, 0))
+        val upHandled = dispatchKeyEvent(
+            KeyEvent(now, android.os.SystemClock.uptimeMillis(), KeyEvent.ACTION_UP, keyCode, 0)
+        )
+        // Injected Back reaches onBackPressed via Activity.onKeyUp; if predictive back is ever
+        // enabled that path is skipped, so fall back to the dispatcher when nothing took it.
+        if (keyCode == KeyEvent.KEYCODE_BACK && !downHandled && !upHandled) {
+            onBackPressedDispatcher.onBackPressed()
+        }
     }
 
     override fun onNewIntent(intent: Intent) {

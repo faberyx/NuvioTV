@@ -8,7 +8,7 @@
 export type TvCommand =
   | { cmd: "pause" }
   | { cmd: "resume" }
-  | { cmd: "seek_by"; ms: number }
+  | { cmd: "seek_by"; ms: number; back_if_idle?: boolean }
   | { cmd: "seek_to"; ms: number }
   | { cmd: "next_episode" }
   | { cmd: "skip_intro" }
@@ -17,7 +17,7 @@ export type TvCommand =
   | { cmd: "play"; query: string }
   | { cmd: "key"; key: RemoteKey; count: number };
 
-export type RemoteKey = "up" | "down" | "left" | "right" | "select";
+export type RemoteKey = "up" | "down" | "left" | "right" | "select" | "back";
 const MAX_KEY_REPEAT = 10;
 
 export interface TvReply {
@@ -88,7 +88,7 @@ const T = {
     help:
       "Puoi dire: voglio vedere seguito da un titolo, metti in pausa, riprendi, vai avanti di trenta secondi, " +
       "torna indietro di un minuto, vai al minuto venti, prossimo episodio, salta l'intro, chiudi il video, " +
-      "oppure cerca seguito da un titolo. Per muoverti: su, giù, sinistra, destra e ok.",
+      "oppure cerca seguito da un titolo. Per muoverti: su, giù, sinistra, destra, ok e torna.",
     ready: "Nuvio è pronto.",
     whatNext: "Cosa vuoi fare?",
     didntUnderstand: "Non ho capito.",
@@ -138,7 +138,7 @@ const T = {
     help:
       "You can say: play followed by a title, pause, resume, skip forward thirty seconds, go back one minute, " +
       "go to minute twenty, next episode, skip the intro, close the video, or search for followed by a title. " +
-      "To move around: up, down, left, right and select.",
+      "To move around: up, down, left, right, select and press back.",
     ready: "Nuvio is ready.",
     whatNext: "What would you like to do?",
     didntUnderstand: "Sorry, I didn't get that.",
@@ -258,8 +258,15 @@ export function mapRequest(request: {
       return cmd({ cmd: "resume" });
     case "AvantiIntent":
       return cmd({ cmd: "seek_by", ms: parseIsoDuration(slots.durata?.value) ?? DEFAULT_SEEK_FORWARD_MS });
-    case "IndietroIntent":
-      return cmd({ cmd: "seek_by", ms: -(parseIsoDuration(slots.durata?.value) ?? DEFAULT_SEEK_BACK_MS) });
+    case "IndietroIntent": {
+      // Just "indietro" / "go back": rewinds in the player, presses Back everywhere else.
+      const ms = parseIsoDuration(slots.durata?.value);
+      return ms === null
+        ? cmd({ cmd: "seek_by", ms: -DEFAULT_SEEK_BACK_MS, back_if_idle: true })
+        : cmd({ cmd: "seek_by", ms: -ms });
+    }
+    case "TastoIndietroIntent":
+      return cmd({ cmd: "key", key: "back", count: 1 });
     case "VaiAlMinutoIntent": {
       const minuti = Number(slots.minuti?.value);
       const ore = Number(slots.ore?.value ?? 0);
@@ -334,7 +341,7 @@ export function speakResult(command: TvCommand, result: TvReply, lang: Lang = "i
  * and skill name; everything else speaks the result and ends the session.
  */
 export function respond(command: TvCommand, result: TvReply, lang: Lang): AlexaResponse {
-  if (command.cmd === "key" && result.ok) {
+  if (result.ok && result.code === "key_sent") {
     return { version: "1.0", response: { shouldEndSession: false } };
   }
   return say(speakResult(command, result, lang));
